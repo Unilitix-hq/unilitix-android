@@ -1,0 +1,34 @@
+{
+    "logs": [
+        {
+            "outputFile": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/values-cs/values-cs.xml",
+            "map": [
+                {
+                    "source": "/Users/oluwatosinayodele/.gradle/caches/transforms-3/9bf740747fdf0b86613cd81dae3c2f06/transformed/core-1.12.0/res/values-cs/values-cs.xml",
+                    "from": {
+                        "startLines": "2,3,4,5,6,7,8,9",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "55,153,255,356,455,560,667,786",
+                        "endColumns": "97,101,100,98,104,106,118,100",
+                        "endOffsets": "148,250,351,450,555,662,781,882"
+                    }
+                }
+            ]
+        },
+        {
+            "outputFile": "io.unilitix.sdk.unilitix-sdk-mergeReleaseResources-29:/values-cs/values-cs.xml",
+            "map": [
+                {
+                    "source": "/Users/oluwatosinayodele/.gradle/caches/transforms-3/9bf740747fdf0b86613cd81dae3c2f06/transformed/core-1.12.0/res/values-cs/values-cs.xml",
+                    "from": {
+                        "startLines": "2,3,4,5,6,7,8,9",
+                        "startColumns": "4,4,4,4,4,4,4,4",
+                        "startOffsets": "55,153,255,356,455,560,667,786",
+                        "endColumns": "97,101,100,98,104,106,118,100",
+                        "endOffsets": "148,250,351,450,555,662,781,882"
+                    }
+                }
+            ]
+        }
+    ]
+}

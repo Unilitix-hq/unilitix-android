@@ -1,0 +1,22 @@
+[
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout/custom_dialog.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout/custom_dialog.xml"
+    },
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout/notification_template_part_chronometer.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout/notification_template_part_chronometer.xml"
+    },
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout/ime_base_split_test_activity.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout/ime_base_split_test_activity.xml"
+    },
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout/ime_secondary_split_test_activity.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout/ime_secondary_split_test_activity.xml"
+    },
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout/notification_template_part_time.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout/notification_template_part_time.xml"
+    }
+]

@@ -1,0 +1,25 @@
+R_DEF: Internal format may change without notice
+local
+drawable ic_launcher_background
+drawable ic_launcher_foreground
+id btn_add_to_cart
+id btn_checkout
+id btn_crash
+id btn_flush
+id btn_login
+id btn_pay
+id btn_product
+id btn_track_event
+id btn_trigger_crash
+id et_amount
+id et_card_expiry
+id et_card_number
+id et_cvv
+layout activity_checkout
+layout activity_crash
+layout activity_main
+layout activity_product
+mipmap ic_launcher
+mipmap ic_launcher_round
+string app_name
+style Theme.UnilitixSample

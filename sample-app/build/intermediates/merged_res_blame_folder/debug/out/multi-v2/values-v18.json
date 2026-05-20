@@ -1,0 +1,19 @@
+{
+    "logs": [
+        {
+            "outputFile": "io.unilitix.sample.sample-app-mergeDebugResources-42:/values-v18/values-v18.xml",
+            "map": [
+                {
+                    "source": "/Users/oluwatosinayodele/.gradle/caches/transforms-3/f7be7fa1e1719171190b527ee943cd06/transformed/appcompat-1.6.1/res/values-v18/values-v18.xml",
+                    "from": {
+                        "startLines": "2",
+                        "startColumns": "4",
+                        "startOffsets": "55",
+                        "endColumns": "48",
+                        "endOffsets": "99"
+                    }
+                }
+            ]
+        }
+    ]
+}

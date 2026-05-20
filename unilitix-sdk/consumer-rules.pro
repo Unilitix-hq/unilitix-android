@@ -1,0 +1,2 @@
+-keep class io.unilitix.sdk.** { *; }
+-keepnames class io.unilitix.sdk.**

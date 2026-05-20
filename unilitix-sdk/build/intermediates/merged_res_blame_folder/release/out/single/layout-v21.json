@@ -1,0 +1,18 @@
+[
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout-v21/notification_action_tombstone.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout-v21/notification_action_tombstone.xml"
+    },
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout-v21/notification_action.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout-v21/notification_action.xml"
+    },
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout-v21/notification_template_icon_group.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout-v21/notification_template_icon_group.xml"
+    },
+    {
+        "merged": "io.unilitix.sdk.unilitix-sdk-merged_res-31:/layout-v21/notification_template_custom_big.xml",
+        "source": "io.unilitix.sdk.unilitix-sdk-core-1.12.0-18:/layout-v21/notification_template_custom_big.xml"
+    }
+]
