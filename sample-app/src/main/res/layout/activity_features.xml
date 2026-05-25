@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="24dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:text="SDK Features Showcase"
+            android:textSize="22sp"
+            android:textStyle="bold" />
+
+        <!-- Privacy -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="PRIVACY"
+            android:textColor="#9e9e9e"
+            android:textSize="11sp"
+            android:letterSpacing="0.12" />
+
+        <Button
+            android:id="@+id/btn_opt_out"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:backgroundTint="#F44336"
+            android:text="Opt Out — stop all recording" />
+
+        <Button
+            android:id="@+id/btn_opt_in"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:backgroundTint="#4CAF50"
+            android:enabled="false"
+            android:text="Opt In — resume recording" />
+
+        <!-- Identity -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="IDENTITY"
+            android:textColor="#9e9e9e"
+            android:textSize="11sp"
+            android:letterSpacing="0.12" />
+
+        <Button
+            android:id="@+id/btn_switch_user"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="Switch User (cycles 3 test users)" />
+
+        <Button
+            android:id="@+id/btn_reset"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:backgroundTint="#FF9800"
+            android:text="Reset — clear userId + new anonymousId" />
+
+        <!-- Session -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="SESSION"
+            android:textColor="#9e9e9e"
+            android:textSize="11sp"
+            android:letterSpacing="0.12" />
+
+        <Button
+            android:id="@+id/btn_new_session"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:text="Force New Session" />
+
+        <Button
+            android:id="@+id/btn_track_screen"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="24dp"
+            android:text="Track Custom Screen Name" />
+
+    </LinearLayout>
+
+</ScrollView>

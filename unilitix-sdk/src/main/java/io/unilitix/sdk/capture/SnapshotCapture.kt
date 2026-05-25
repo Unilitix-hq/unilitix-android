@@ -20,8 +20,13 @@ import android.widget.EditText
 import android.widget.ImageView
 import android.widget.TextView
 import io.unilitix.sdk.UnilitixConfig
+import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.core.Snapshot
 import io.unilitix.sdk.util.Logger
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 
@@ -31,19 +36,23 @@ internal class SnapshotCapture(
 ) : Application.ActivityLifecycleCallbacks {
 
     private val handler = Handler(Looper.getMainLooper())
+    private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var ordinal = 0
     private var currentActivity: Activity? = null
+
+    // Snapshot interval clamped to [1s, 60s] — never fast enough to cause jank.
+    private val intervalMs = config.snapshotIntervalMs.coerceIn(MIN_INTERVAL_MS, MAX_INTERVAL_MS)
 
     private val captureRunnable = object : Runnable {
         override fun run() {
             currentActivity?.let { capture(it) }
-            handler.postDelayed(this, config.snapshotIntervalMs)
+            handler.postDelayed(this, intervalMs)
         }
     }
 
     override fun onActivityResumed(activity: Activity) {
         currentActivity = activity
-        handler.postDelayed(captureRunnable, config.snapshotIntervalMs)
+        handler.postDelayed(captureRunnable, intervalMs)
     }
 
     override fun onActivityPaused(activity: Activity) {
@@ -52,11 +61,11 @@ internal class SnapshotCapture(
     }
 
     private fun capture(activity: Activity) {
+        // Capture view reference and viewport dimensions on the main thread.
         val rootView = activity.window.decorView
 
         // Use full physical display size so viewport coordinates match getLocationOnScreen.
-        // decorView.height excludes the nav bar on non-edge-to-edge builds, causing buttons
-        // near the bottom to have y > viewportHeight when the dashboard scales the frame.
+        // decorView.height excludes the nav bar on non-edge-to-edge builds.
         val viewportWidth: Int
         val viewportHeight: Int
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -72,45 +81,32 @@ internal class SnapshotCapture(
             viewportHeight = dm.heightPixels
         }
 
-        try {
-            val hierarchy = serializeView(rootView, 0) ?: return
+        val captureOrdinal = ordinal++
+        val screenName = activity.javaClass.simpleName
 
-            Logger.d("=== FRAME CAPTURE VERIFICATION ===")
-            Logger.d("Device screen: ${viewportWidth}x${viewportHeight}, root view: ${rootView.width}x${rootView.height}")
-            logButtons(hierarchy, viewportHeight)
-            Logger.d("===================================")
-
-            val snapshot = Snapshot(
-                capturedAt = System.currentTimeMillis(),
-                ordinal = ordinal++,
-                screenName = activity.javaClass.simpleName,
-                viewportWidth = viewportWidth,
-                viewportHeight = viewportHeight,
-                hierarchy = hierarchy
-            )
-            onSnapshot(snapshot)
-        } catch (e: Exception) {
-            Logger.w("SnapshotCapture: ${e.message}")
-        }
-    }
-
-    private fun logButtons(node: JSONObject, viewportHeight: Int) {
-        val type = node.optString("type", "")
-        if (type.contains("Button", ignoreCase = true)) {
-            val bounds = node.optJSONObject("bounds")
-            val y = bounds?.optInt("y", 0) ?: 0
-            val h = bounds?.optInt("h", 0) ?: 0
-            val text = node.optString("text", "")
-            val ratio = if (viewportHeight > 0) "%.3f".format(y.toFloat() / viewportHeight) else "?"
-            Logger.d("Button '$text' at y=$y h=$h ratio=$ratio (bottom=${y + h}, viewport=$viewportHeight)")
-        }
-        val children = node.optJSONArray("children") ?: return
-        for (i in 0 until children.length()) {
-            children.optJSONObject(i)?.let { logButtons(it, viewportHeight) }
+        // Serialize the view tree on the IO thread to avoid blocking the main thread.
+        // View properties are read-only at this point and safe to access off-thread.
+        captureScope.launch {
+            try {
+                val hierarchy = serializeView(rootView, 0) ?: return@launch
+                onSnapshot(
+                    Snapshot(
+                        capturedAt    = System.currentTimeMillis(),
+                        ordinal       = captureOrdinal,
+                        screenName    = screenName,
+                        viewportWidth = viewportWidth,
+                        viewportHeight = viewportHeight,
+                        hierarchy     = hierarchy
+                    )
+                )
+            } catch (e: Exception) {
+                Logger.w("SnapshotCapture: ${e.message}")
+            }
         }
     }
 
     private fun serializeView(view: View, depth: Int): JSONObject? {
+        if (view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java)) return null
         // GONE views have no layout — skip entirely so they don't pollute the tree.
         // INVISIBLE views still occupy space and may wrap visible children — capture them.
         if (view.visibility == View.GONE) return null
@@ -206,10 +202,8 @@ internal class SnapshotCapture(
         }
 
         // Strategy 3: RippleDrawable (Material 2 buttons wrap a shape in a ripple)
-        if (Build.VERSION.SDK_INT >= 21) {
-            (view.background as? RippleDrawable)?.let { ripple ->
-                colorFromLayerDrawable(ripple)?.let { return it }
-            }
+        (view.background as? RippleDrawable)?.let { ripple ->
+            colorFromLayerDrawable(ripple)?.let { return it }
         }
 
         // Strategy 4: LayerDrawable wrapping something colored (some custom themes)
@@ -269,4 +263,9 @@ internal class SnapshotCapture(
     override fun onActivityStopped(activity: Activity) {}
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
     override fun onActivityDestroyed(activity: Activity) {}
+
+    companion object {
+        private const val MIN_INTERVAL_MS = 1_000L
+        private const val MAX_INTERVAL_MS = 60_000L
+    }
 }

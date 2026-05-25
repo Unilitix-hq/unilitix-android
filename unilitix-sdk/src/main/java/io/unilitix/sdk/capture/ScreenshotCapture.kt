@@ -11,11 +11,13 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.DisplayMetrics
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
 import android.widget.EditText
 import io.unilitix.sdk.UnilitixConfig
+import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.core.Screenshot
 import io.unilitix.sdk.util.Logger
 import java.io.ByteArrayOutputStream
@@ -73,8 +75,22 @@ internal class ScreenshotCapture(
 
         val currentOrdinal = ordinal++
         val screenName = activity.javaClass.simpleName
-        val viewportW = rootView.width
-        val viewportH = rootView.height
+
+        // Full physical display size — rootView excludes nav bar on non-edge-to-edge builds.
+        val viewportW: Int
+        val viewportH: Int
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val bounds = activity.windowManager.currentWindowMetrics.bounds
+            viewportW = bounds.width()
+            viewportH = bounds.height()
+        } else {
+            @Suppress("DEPRECATION")
+            val dm = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            activity.windowManager.defaultDisplay.getRealMetrics(dm)
+            viewportW = dm.widthPixels
+            viewportH = dm.heightPixels
+        }
 
         // Collect rects on main thread — View access is only safe here
         val maskRects = if (config.maskInputsInScreenshots) {
@@ -115,6 +131,19 @@ internal class ScreenshotCapture(
 
         val rects = mutableListOf<Rect>()
         walkViews(rootView) { view ->
+            // @UnilitixPrivate: mask entire subtree as one rect and stop child traversal
+            if (view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java) && view.width > 0 && view.height > 0) {
+                val loc = IntArray(2)
+                view.getLocationInWindow(loc)
+                rects.add(Rect(
+                    loc[0] - rootLoc[0],
+                    loc[1] - rootLoc[1],
+                    loc[0] - rootLoc[0] + view.width,
+                    loc[1] - rootLoc[1] + view.height,
+                ))
+                return@walkViews false  // parent rect covers all children
+            }
+
             val shouldMask = when {
                 view is EditText -> {
                     val it = view.inputType
@@ -141,6 +170,7 @@ internal class ScreenshotCapture(
                     )
                 )
             }
+            true  // continue traversing children
         }
         return rects
     }
@@ -153,8 +183,9 @@ internal class ScreenshotCapture(
         return masked
     }
 
-    private fun walkViews(view: View, callback: (View) -> Unit) {
-        callback(view)
+    // Returns false from callback to stop child traversal for that subtree
+    private fun walkViews(view: View, callback: (View) -> Boolean) {
+        if (!callback(view)) return
         if (view is ViewGroup) {
             for (i in 0 until view.childCount) walkViews(view.getChildAt(i), callback)
         }

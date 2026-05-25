@@ -24,7 +24,7 @@ internal class FlushScheduler(private val context: Context) {
 
         WorkManager.getInstance(context).enqueueUniqueWork(
             WORK_NAME,
-            ExistingWorkPolicy.REPLACE,
+            ExistingWorkPolicy.KEEP,
             request
         )
 

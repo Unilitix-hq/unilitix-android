@@ -8,6 +8,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.Window
 import android.widget.EditText
+import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.util.Logger
 
 internal class TouchTracker(
@@ -49,6 +50,8 @@ internal class TouchTracker(
         val y = event.rawY
 
         val touchedView = findViewAtPoint(activity, x, y)
+
+        if (touchedView?.javaClass?.isAnnotationPresent(UnilitixPrivate::class.java) == true) return
 
         if (touchedView != null) {
             if (maskedViewIds.contains(touchedView.id)) {

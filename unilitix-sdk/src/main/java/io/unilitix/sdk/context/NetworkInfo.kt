@@ -1,6 +1,7 @@
 package io.unilitix.sdk.context
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.ConnectivityManager
@@ -23,7 +24,7 @@ internal fun collectNetworkInfo(context: Context): NetworkInfo {
         val network = cm.activeNetwork
         val caps = cm.getNetworkCapabilities(network)
         when {
-            caps == null -> "NONE"
+            caps == null -> "OFFLINE"
             caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "WIFI"
             caps.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> resolveCellularGeneration(context)
             caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET) -> "ETHERNET"
@@ -34,7 +35,7 @@ internal fun collectNetworkInfo(context: Context): NetworkInfo {
         when (cm.activeNetworkInfo?.type) {
             ConnectivityManager.TYPE_WIFI -> "WIFI"
             ConnectivityManager.TYPE_MOBILE -> resolveCellularGeneration(context)
-            else -> "NONE"
+            else -> "OFFLINE"
         }
     }
 
@@ -43,6 +44,7 @@ internal fun collectNetworkInfo(context: Context): NetworkInfo {
     return NetworkInfo(connectionType = connectionType, carrier = carrier)
 }
 
+@SuppressLint("MissingPermission")
 private fun resolveCellularGeneration(context: Context): String {
     val hasTelephonyPermission = ContextCompat.checkSelfPermission(
         context, Manifest.permission.READ_PHONE_STATE

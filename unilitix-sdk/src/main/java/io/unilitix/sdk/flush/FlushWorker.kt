@@ -46,11 +46,19 @@ internal class FlushWorker(context: Context, params: WorkerParameters) : Corouti
                 is ApiResult.Success -> {
                     dao.deleteById(event.id)
                     Logger.d("FlushWorker: batch ${event.id} sent (attempt $syncAttempts)")
-                    val sessionId = result.sessionId
-                    if (sessionId.isNotEmpty()) {
+                    val serverSessionId = result.sessionId
+                    if (serverSessionId.isNotEmpty()) {
                         val snapshots = sdk.snapshotBuffer.drain()
                         if (snapshots.isNotEmpty()) {
-                            sdk.apiClient.uploadSnapshots(sessionId, snapshots)
+                            sdk.apiClient.uploadSnapshots(serverSessionId, snapshots)
+                        }
+                        try {
+                            val localSessionId = JSONObject(event.sessionJson).optString("sessionId", "")
+                            if (localSessionId.isNotEmpty()) {
+                                db.screenshotDao().remapSessionId(localSessionId, serverSessionId)
+                            }
+                        } catch (e: Exception) {
+                            Logger.w("FlushWorker: failed to remap screenshot session IDs: ${e.message}")
                         }
                     }
                 }
@@ -85,9 +93,13 @@ internal class FlushWorker(context: Context, params: WorkerParameters) : Corouti
         }
 
         try {
-            sdk.apiClient.uploadScreenshots(pending)
-            screenshotDao.deleteByIds(pending.map { it.id })
-            Logger.d("FlushWorker: uploaded and deleted ${pending.size} screenshots")
+            val confirmedIds = sdk.apiClient.uploadScreenshots(pending)
+            if (confirmedIds.isNotEmpty()) {
+                screenshotDao.deleteByIds(confirmedIds.toList())
+                Logger.d("FlushWorker: confirmed and deleted ${confirmedIds.size}/${pending.size} screenshots")
+            } else {
+                Logger.w("FlushWorker: 0/${pending.size} screenshots confirmed — will retry next flush")
+            }
         } catch (e: Exception) {
             Logger.w("FlushWorker: screenshot upload error: ${e.message}")
         }
@@ -100,6 +112,7 @@ internal class FlushWorker(context: Context, params: WorkerParameters) : Corouti
             val sessionObj = JSONObject(event.sessionJson)
             sessionObj.put("syncAttempts", syncAttempts)
             sessionObj.put("syncFailedBatches", event.syncFailedBatches)
+            sessionObj.put("syncDelayMs", System.currentTimeMillis() - event.createdAt)
             """{"session":$sessionObj,"events":${event.eventsJson}}"""
         } catch (e: Exception) {
             Logger.w("FlushWorker: failed to inject sync stats: ${e.message}")

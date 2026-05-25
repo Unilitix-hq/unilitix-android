@@ -61,23 +61,27 @@ internal class SessionManager(
     }
 
     fun startNewSession() {
+        val prev = currentSession?.id?.take(8)
         val session = Session()
         currentSession = session
         foregroundedAt = System.currentTimeMillis()
         lastObservedNetwork = "INITIAL"
-        Logger.d("SessionManager: new session started id=${session.id}")
+        Logger.d("SessionManager: new session started id=${session.id.take(8)} (previous: $prev)")
         onSessionStart(session)
     }
 
     fun endCurrentSession() {
         val session = currentSession ?: return
         currentSession = null
-        Logger.d("SessionManager: session ended id=${session.id}")
+        Logger.d("SessionManager: session ended id=${session.id.take(8)} crashed=${session.crashed}")
         onSessionEnd(session)
     }
 
     fun markCrashed() {
-        currentSession?.crashed = true
+        currentSession?.let {
+            it.crashed = true
+            Logger.d("SessionManager: session ${it.id.take(8)} marked as crashed")
+        }
     }
 
     fun onNetworkTypeChanged(newType: String) {

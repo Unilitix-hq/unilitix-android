@@ -24,4 +24,7 @@ internal interface ScreenshotDao {
 
     @Query("DELETE FROM pending_screenshots WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<Long>)
+
+    @Query("UPDATE pending_screenshots SET session_id = :serverSessionId WHERE session_id = :localSessionId")
+    suspend fun remapSessionId(localSessionId: String, serverSessionId: String)
 }

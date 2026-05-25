@@ -1,6 +1,7 @@
 package io.unilitix.sdk
 
 import android.app.Application
+import io.unilitix.sdk.BuildConfig
 import io.unilitix.sdk.capture.CrashHandler
 import io.unilitix.sdk.capture.PerformanceMonitor
 import io.unilitix.sdk.capture.RageTapDetector
@@ -25,6 +26,7 @@ import io.unilitix.sdk.storage.EventDatabase
 import io.unilitix.sdk.storage.PendingEvent
 import io.unilitix.sdk.storage.PendingScreenshot
 import io.unilitix.sdk.util.Json
+import java.io.File
 import io.unilitix.sdk.util.Logger
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -39,24 +41,32 @@ object Unilitix {
     @Volatile
     internal var instance: UnilitixInternal? = null
 
-    fun init(application: Application, apiKey: String, configure: UnilitixConfig.() -> Unit = {}) {
+    @JvmStatic
+    fun init(application: Application, apiKey: String, configure: UnilitixConfig.Builder.() -> Unit = {}) {
         if (instance != null) {
             Logger.w("Unilitix.init() called more than once — ignoring")
             return
         }
-        val config = UnilitixConfig().apply(configure)
-        Logger.debugEnabled = config.debugLogging
+        val config = UnilitixConfig.Builder().apply(configure).build()
+        // In release builds BuildConfig.DEBUG is false, so this assignment is a no-op and
+        // debug logs can never be enabled regardless of what the host app configures.
+        if (BuildConfig.DEBUG) Logger.debugEnabled = config.debugLogging
+        if (config.sessionTimeoutSeconds < 60) {
+            Logger.w("Unilitix: sessionTimeoutSeconds=${config.sessionTimeoutSeconds} is very low — consider 1800 (30 min) to avoid session fragmentation")
+        }
 
         val internal = UnilitixInternal(application, apiKey, config)
         instance = internal
         internal.start()
-        Logger.d("Unilitix SDK initialized, apiKey=${apiKey.take(8)}...")
+        Logger.d("Unilitix SDK initialized, apiKey=${apiKey.take(8)}... session=${internal.sessionManager.currentSession?.id?.take(8)}")
     }
 
+    @JvmStatic
     fun identify(userId: String, traits: Map<String, Any> = emptyMap()) {
         instance?.identity?.identify(userId, traits)
     }
 
+    @JvmStatic
     fun trackEvent(name: String, properties: Map<String, Any> = emptyMap()) {
         val internal = instance ?: run {
             Logger.w("Unilitix.trackEvent() called before init()")
@@ -70,6 +80,7 @@ object Unilitix {
         }
     }
 
+    @JvmStatic
     fun trackScreen(screenName: String) {
         val internal = instance ?: return
         if (internal.optedOut) return
@@ -79,14 +90,17 @@ object Unilitix {
         }
     }
 
+    @JvmStatic
     fun startSession() {
         instance?.sessionManager?.startNewSession()
     }
 
+    @JvmStatic
     fun endSession() {
         instance?.sessionManager?.endCurrentSession()
     }
 
+    @JvmStatic
     fun flush() {
         val internal = instance ?: return
         internal.scope.launch {
@@ -94,16 +108,25 @@ object Unilitix {
         }
     }
 
+    @JvmStatic
     fun optOut() {
-        instance?.optedOut = true
-        Logger.d("Unilitix: opted out")
+        val internal = instance ?: return
+        internal.optedOut = true
+        internal.persistOptOut(true)
+        internal.batteryInfo.stopObserving()
+        Logger.d("Unilitix: opted out (persisted)")
     }
 
+    @JvmStatic
     fun optIn() {
-        instance?.optedOut = false
-        Logger.d("Unilitix: opted in")
+        val internal = instance ?: return
+        internal.optedOut = false
+        internal.persistOptOut(false)
+        internal.batteryInfo.startObserving()
+        Logger.d("Unilitix: opted in (persisted)")
     }
 
+    @JvmStatic
     fun reset() {
         val internal = instance ?: return
         internal.identity.reset()
@@ -121,16 +144,22 @@ internal class UnilitixInternal(
     internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     internal val identity = Identity(application)
-    internal val apiClient = ApiClient(config.apiUrl, apiKey, config.debugLogging)
+    internal val apiClient = ApiClient(config.apiUrl, apiKey)
     internal val networkMonitor = NetworkMonitor(application)
 
     private val database = EventDatabase.getInstance(application)
     private val flushScheduler = FlushScheduler(application)
     internal val breadcrumbs = Breadcrumbs()
     private val performanceMonitor = PerformanceMonitor()
-    private val batteryInfo = BatteryInfo(application)
+    internal val batteryInfo = BatteryInfo(application)
 
-    @Volatile internal var optedOut = false
+    private val prefs = application.getSharedPreferences("unilitix_prefs", android.content.Context.MODE_PRIVATE)
+
+    @Volatile internal var optedOut = prefs.getBoolean("opt_out", false)
+
+    internal fun persistOptOut(value: Boolean) {
+        prefs.edit().putBoolean("opt_out", value).apply()
+    }
 
     internal val snapshotBuffer = SnapshotBuffer(config.maxSnapshotsPerSession)
     private var snapshotCapture: SnapshotCapture? = null
@@ -206,12 +235,15 @@ internal class UnilitixInternal(
 
         if (config.autoTrackCrashes) {
             CrashHandler(
+                context = application,
                 breadcrumbs = breadcrumbs,
                 database = database,
                 getCurrentSessionJson = { buildSessionJson(sessionManager.currentSession) },
                 onCrash = { sessionManager.markCrashed() }
             ).install()
         }
+
+        recoverPendingCrash()
 
         if (config.captureSnapshots) {
             snapshotCapture = SnapshotCapture(config) { snapshot ->
@@ -263,6 +295,26 @@ internal class UnilitixInternal(
         )
 
         Logger.d("UnilitixInternal: started")
+    }
+
+    private fun recoverPendingCrash() {
+        scope.launch {
+            val file = File(application.cacheDir, "unilitix_crash_pending.json")
+            if (!file.exists()) return@launch
+            try {
+                val obj = org.json.JSONObject(file.readText())
+                database.eventDao().insert(
+                    PendingEvent(
+                        sessionJson = obj.optString("sessionJson", "{}"),
+                        eventsJson  = obj.optString("eventsJson", "[]")
+                    )
+                )
+                file.delete()
+                Logger.d("Unilitix: recovered pending crash report from disk")
+            } catch (e: Exception) {
+                Logger.w("Unilitix: failed to recover pending crash: ${e.message}")
+            }
+        }
     }
 
     internal suspend fun emitEvent(event: UnilitixEvent) {
@@ -348,7 +400,10 @@ internal class UnilitixInternal(
             "buildNumber"     to deviceInfo.buildNumber,
             "packageName"     to deviceInfo.packageName,
             "sdkVersion"      to deviceInfo.sdkVersion,
-            "networkType"     to networkInfo.connectionType,
+            "networkType"     to when (networkInfo.connectionType) {
+                "NONE", "UNKNOWN", "ETHERNET", "" -> "OFFLINE"
+                else -> networkInfo.connectionType
+            },
             "carrierName"     to (networkInfo.carrier ?: ""),
             "orientation"     to deviceInfo.orientation,
             "locale"          to deviceInfo.locale,
@@ -359,13 +414,16 @@ internal class UnilitixInternal(
             "totalStorageGb"  to deviceInfo.totalStorageGb,
             "batteryLevel"    to battery,
             "startedAt"       to isoTimestamp(session.startedAt),
+            "endedAt"         to isoTimestamp(System.currentTimeMillis()),
+            "durationMs"      to (System.currentTimeMillis() - session.startedAt),
             "foregroundTimeMs" to session.foregroundTimeMs.toInt(),
             "backgroundTimeMs" to session.backgroundTimeMs.toInt(),
             "crashed"         to session.crashed,
             "capturedOffline"    to (session.offlineEventCount > 0),
             "offlineEventCount"  to session.offlineEventCount,
             "onlineEventCount"   to session.onlineEventCount,
-            "networkTransitions" to session.networkTransitions
+            "networkTransitions" to session.networkTransitions,
+            "sessionId"    to session.id.toString()
             // syncAttempts / syncFailedBatches are injected by FlushWorker at upload time
         )
 

@@ -1,0 +1,9 @@
+
+# Build artifacts
+build/
+.gradle/
+*.aar
+*.jar
+*.class
+*.dex
+local.properties

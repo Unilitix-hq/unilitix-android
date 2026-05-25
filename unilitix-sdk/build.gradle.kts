@@ -14,13 +14,17 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.2.0\"")
+        buildConfigField("String", "SDK_VERSION", "\"1.3.0\"")
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            buildConfigField("String", "API_HOST", "\"unilitix-api-production.up.railway.app\"")
+        }
+        debug {
+            buildConfigField("String", "API_HOST", "\"localhost\"")
         }
     }
 
@@ -56,6 +60,7 @@ dependencies {
     implementation(libs.lifecycle.runtime.ktx)
 
     implementation(libs.startup.runtime)
+    implementation(libs.security.crypto)
 
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
@@ -70,7 +75,7 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "io.unilitix"
                 artifactId = "unilitix-android"
-                version = "1.2.0"
+                version = "1.3.0"
             }
         }
     }

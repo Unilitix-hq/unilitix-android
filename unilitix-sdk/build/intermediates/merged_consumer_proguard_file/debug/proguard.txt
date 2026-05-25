@@ -1,2 +1,0 @@
--keep class io.tazama.sdk.** { *; }
--keepnames class io.tazama.sdk.**

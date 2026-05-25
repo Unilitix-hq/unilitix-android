@@ -1,52 +1,128 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:gravity="center"
-    android:orientation="vertical"
-    android:padding="24dp">
+    android:fillViewport="true">
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Unilitix SDK Demo"
-        android:textSize="24sp"
-        android:textStyle="bold"
-        android:layout_marginBottom="32dp" />
-
-    <Button
-        android:id="@+id/btn_product"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:text="Go to Product"
-        android:layout_marginBottom="12dp" />
+        android:gravity="center_horizontal"
+        android:orientation="vertical"
+        android:padding="24dp">
 
-    <Button
-        android:id="@+id/btn_login"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Login as user_123"
-        android:layout_marginBottom="12dp" />
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="32dp"
+            android:text="Unilitix SDK Demo"
+            android:textSize="24sp"
+            android:textStyle="bold" />
 
-    <Button
-        android:id="@+id/btn_track_event"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Track Custom Event"
-        android:layout_marginBottom="12dp" />
+        <Button
+            android:id="@+id/btn_product"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="Go to Products" />
 
-    <Button
-        android:id="@+id/btn_flush"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="Force Flush"
-        android:layout_marginBottom="12dp" />
+        <Button
+            android:id="@+id/btn_login"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="Login as user_123" />
 
-    <Button
-        android:id="@+id/btn_crash"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:backgroundTint="#F44336"
-        android:text="Crash Activity →" />
+        <Button
+            android:id="@+id/btn_track_event"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="Track Custom Event" />
 
-</LinearLayout>
+        <Button
+            android:id="@+id/btn_flush"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="12dp"
+            android:text="Force Flush" />
+
+        <Button
+            android:id="@+id/btn_crash"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:backgroundTint="#F44336"
+            android:text="Crash Activity →" />
+
+        <Button
+            android:id="@+id/btn_features"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:backgroundTint="#1565C0"
+            android:text="SDK Features →" />
+
+        <TextView
+            android:id="@+id/tv_crash_recovery"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="8dp"
+            android:background="#1b5e20"
+            android:padding="12dp"
+            android:text="✓ Recovered from previous crash — SDK captured the exception"
+            android:textColor="#a5d6a7"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <!-- Rage tap demo — SDK auto-detects 3+ taps within 1000ms and fires RAGE_TAP -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingBottom="8dp"
+            android:paddingTop="32dp"
+            android:text="Rage Tap Demo — tap 3× fast"
+            android:textColor="#9e9e9e"
+            android:textSize="12sp" />
+
+        <FrameLayout
+            android:id="@+id/rage_tap_target"
+            android:layout_width="match_parent"
+            android:layout_height="80dp"
+            android:background="#1a1a2e"
+            android:clickable="true"
+            android:focusable="true">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="center"
+                android:text="Tap here rapidly to trigger RAGE_TAP"
+                android:textColor="#f5a623"
+                android:textSize="13sp" />
+        </FrameLayout>
+
+        <!-- Scroll demo hint pointing to Products screen -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingBottom="4dp"
+            android:paddingTop="24dp"
+            android:text="Scroll Demo — open Products screen"
+            android:textColor="#9e9e9e"
+            android:textSize="12sp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center"
+            android:paddingBottom="24dp"
+            android:text="The product list generates SCROLL events automatically"
+            android:textColor="#bdbdbd"
+            android:textSize="11sp" />
+
+    </LinearLayout>
+
+</ScrollView>

@@ -13,6 +13,14 @@ internal class GzipInterceptor : Interceptor {
         val original = chain.request()
         val originalBody = original.body ?: return chain.proceed(original)
 
+        // Only compress JSON payloads to the SDK API — binary uploads (R2 presigned PUT)
+        // must not be gzip-compressed: the body would be invalid and Content-Length becomes
+        // unknown (-1), causing R2 to reject the upload with 411 Length Required.
+        val contentType = originalBody.contentType()?.toString() ?: ""
+        if (!contentType.contains("application/json")) {
+            return chain.proceed(original)
+        }
+
         val compressedRequest = original.newBuilder()
             .header("Content-Encoding", "gzip")
             .method(original.method, gzip(originalBody))

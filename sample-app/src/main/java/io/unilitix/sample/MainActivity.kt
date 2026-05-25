@@ -1,7 +1,9 @@
 package io.unilitix.sample
 
+import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.view.View
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
 import io.unilitix.sample.databinding.ActivityMainBinding
@@ -15,6 +17,12 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        val prefs = getSharedPreferences("sample_prefs", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("last_session_crashed", false)) {
+            binding.tvCrashRecovery.visibility = View.VISIBLE
+            prefs.edit().remove("last_session_crashed").apply()
+        }
 
         binding.btnProduct.setOnClickListener {
             startActivity(Intent(this, ProductActivity::class.java))
@@ -36,7 +44,12 @@ class MainActivity : AppCompatActivity() {
         }
 
         binding.btnCrash.setOnClickListener {
+            prefs.edit().putBoolean("last_session_crashed", true).apply()
             startActivity(Intent(this, CrashActivity::class.java))
+        }
+
+        binding.btnFeatures.setOnClickListener {
+            startActivity(Intent(this, FeaturesActivity::class.java))
         }
     }
 }
