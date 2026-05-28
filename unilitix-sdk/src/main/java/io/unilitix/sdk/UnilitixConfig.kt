@@ -1,5 +1,7 @@
 package io.unilitix.sdk
 
+import io.unilitix.sdk.BuildConfig
+
 /**
  * Immutable SDK configuration. Construct via [Builder] (Kotlin DSL or Java fluent API).
  *
@@ -56,7 +58,7 @@ data class UnilitixConfig internal constructor(
         var flushBatchSize: Int = 100
         var maxOfflineEvents: Int = 1000
         var sessionTimeoutSeconds: Int = 1800
-        var debugLogging: Boolean = false
+        var debugLogging: Boolean = BuildConfig.DEBUG
         var maskInputs: Boolean = true
         var maskedViewIds: Set<Int> = emptySet()
         var sampleRate: Double = 1.0

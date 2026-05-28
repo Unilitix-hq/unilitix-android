@@ -14,7 +14,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.3.0\"")
+        buildConfigField("String", "SDK_VERSION", "\"1.4.0\"")
     }
 
     buildTypes {
@@ -75,7 +75,7 @@ afterEvaluate {
                 from(components["release"])
                 groupId = "io.unilitix"
                 artifactId = "unilitix-android"
-                version = "1.3.0"
+                version = "1.4.0"
             }
         }
     }

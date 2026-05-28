@@ -58,7 +58,7 @@ object Unilitix {
         val internal = UnilitixInternal(application, apiKey, config)
         instance = internal
         internal.start()
-        Logger.d("Unilitix SDK initialized, apiKey=${apiKey.take(8)}... session=${internal.sessionManager.currentSession?.id?.take(8)}")
+        Logger.d("✅ Unilitix SDK initialized | key=${apiKey.take(8)}... | session=${internal.sessionManager.currentSession?.id?.take(8)} | v${BuildConfig.SDK_VERSION}")
     }
 
     @JvmStatic
@@ -168,7 +168,7 @@ internal class UnilitixInternal(
     internal val sessionManager = SessionManager(
         sessionTimeoutSeconds = config.sessionTimeoutSeconds,
         onSessionStart = { session ->
-            Logger.d("Session started: ${session.id}")
+            Logger.d("✅ Session started | id=${session.id}")
             screenshotCapture?.resetOrdinal()
         },
         onSessionEnd = { session ->
