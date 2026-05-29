@@ -3,6 +3,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.ksp)    // required for Room code generation
     id("maven-publish")
+    id("signing")
 }
 
 android {
@@ -14,7 +15,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.4.0\"")
+        buildConfigField("String", "SDK_VERSION", "\"1.4.1\"")
     }
 
     buildTypes {
@@ -68,15 +69,52 @@ dependencies {
     androidTestImplementation(libs.androidx.espresso.core)
 }
 
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
+publishing {
+    publications {
+        create<MavenPublication>("release") {
+            groupId = "com.unilitix"
+            artifactId = "unilitix-android"
+            version = "1.4.1"
+
+            afterEvaluate {
                 from(components["release"])
-                groupId = "io.unilitix"
-                artifactId = "unilitix-android"
-                version = "1.4.0"
+            }
+
+            pom {
+                name.set("Unilitix Android SDK")
+                description.set("African-first mobile UX analytics for Android. Track sessions, screens, events and crashes.")
+                url.set("https://unilitix.com")
+
+                licenses {
+                    license {
+                        name.set("MIT License")
+                        url.set("https://opensource.org/licenses/MIT")
+                    }
+                }
+
+                developers {
+                    developer {
+                        id.set("unilitix")
+                        name.set("Unilitix")
+                        email.set("oluwatosin@unilitix.com")
+                    }
+                }
+
+                scm {
+                    connection.set("scm:git:github.com/Unilitix-hq/unilitix-android.git")
+                    developerConnection.set("scm:git:ssh://github.com/Unilitix-hq/unilitix-android.git")
+                    url.set("https://github.com/Unilitix-hq/unilitix-android")
+                }
             }
         }
     }
+}
+
+signing {
+    val signingKeyId = System.getenv("GPG_KEY_ID")
+    val signingKey = System.getenv("GPG_SECRET_KEY")
+    val signingPassword = System.getenv("GPG_PASSPHRASE")
+    useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+    sign(publishing.publications["release"])
+    isRequired = true
 }
