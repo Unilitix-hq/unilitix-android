@@ -103,7 +103,12 @@ Unilitix.flush()                      // immediately send buffered events
 Unilitix.optOut()                     // disable all tracking
 Unilitix.optIn()                      // re-enable tracking
 Unilitix.reset()                      // clear identity, start fresh anonymous session
+Unilitix.recordException(type, message, stackTrace, fatal)  // report a caught error (EXCEPTION) or, with fatal=true, a CRASH persisted before you re-throw
+Unilitix.addBreadcrumb(message, category)                   // add to the trail attached to the next crash report (last 50 kept)
+Unilitix.isInitialized                                      // true once init() has run
 ```
+
+Crash and exception reports carry a stable `metadata.fingerprint` (exception type + top three frames, line numbers ignored), `title` and `fatal`, so the dashboard counts one bug once across devices. JVM uncaught exceptions are reported as fatal.
 
 ## Offline Support
 

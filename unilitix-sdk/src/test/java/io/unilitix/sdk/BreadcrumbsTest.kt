@@ -8,13 +8,24 @@ import org.junit.Test
 class BreadcrumbsTest {
 
     @Test
-    fun `keeps last 10 entries`() {
+    fun `keeps last 50 entries`() {
         val breadcrumbs = Breadcrumbs()
-        repeat(15) { breadcrumbs.add("TAP", "Screen$it") }
+        repeat(60) { breadcrumbs.add("TAP", "Screen$it") }
         val snapshot = breadcrumbs.snapshot()
-        assertEquals(10, snapshot.size)
-        assertEquals("Screen14", snapshot.last().screen)
-        assertEquals("Screen5", snapshot.first().screen)
+        assertEquals(50, snapshot.size)
+        assertEquals("Screen59", snapshot.last().screen)
+        assertEquals("Screen10", snapshot.first().screen)
+    }
+
+    @Test
+    fun `message rides along and lastScreen skips crumbs without one`() {
+        val breadcrumbs = Breadcrumbs()
+        breadcrumbs.add("NAVIGATE", "Checkout")
+        breadcrumbs.add("custom", null, "payment started")
+        assertEquals("Checkout", breadcrumbs.lastScreen())
+        val wire = breadcrumbs.toWire()
+        assertEquals("payment started", wire.last()["message"])
+        assertEquals(false, wire.first().containsKey("message"))
     }
 
     @Test

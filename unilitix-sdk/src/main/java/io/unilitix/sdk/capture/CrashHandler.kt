@@ -2,6 +2,7 @@ package io.unilitix.sdk.capture
 
 import android.content.Context
 import io.unilitix.sdk.core.Breadcrumbs
+import io.unilitix.sdk.core.Fingerprint
 import io.unilitix.sdk.storage.EventDatabase
 import io.unilitix.sdk.storage.PendingEvent
 import io.unilitix.sdk.util.Logger
@@ -43,20 +44,25 @@ internal class CrashHandler(
         try {
             onCrash()
 
-            val stackTrace = throwable.stackTraceToString()
-            val crumbList = breadcrumbs.snapshot()
-            val crumbs = crumbList.map {
-                mapOf("type" to it.type, "screen" to (it.screen ?: ""), "timestamp" to it.timestamp)
-            }
-            val lastScreen = crumbList.lastOrNull { it.screen != null }?.screen ?: ""
+            val stackTrace = throwable.stackTraceToString().take(16_000)
+            val crumbs = breadcrumbs.toWire()
+            val lastScreen = breadcrumbs.lastScreen() ?: ""
+            val exType = throwable.javaClass.name
+            val title = "$exType: ${throwable.message ?: ""}".take(200)
 
             val crashEvent = mapOf(
                 "type"             to "CRASH",
                 "timestamp"        to isoNow(),
-                "exceptionType"    to throwable.javaClass.name,
+                "exceptionType"    to exType,
                 "exceptionMessage" to (throwable.message ?: ""),
                 "stackTrace"       to stackTrace,
                 "breadcrumbs"      to crumbs,
+                // A JVM uncaught exception kills the process: fatal, like the
+                // Flutter SDK's native crashes. Title and fingerprint let the
+                // server group one bug once across devices.
+                "fatal"            to true,
+                "title"            to title,
+                "metadata"         to mapOf("fingerprint" to Fingerprint.of(exType, stackTrace)),
                 "screen"           to lastScreen,
                 "x"                to 0.0,
                 "y"                to 0.0,

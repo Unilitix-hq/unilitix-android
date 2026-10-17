@@ -18,8 +18,17 @@ jobs:
         with:
           gradle-version: '8.2'
 
+      - name: Tag matches the library version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          LIB=$(grep -E 'version = "' unilitix-sdk/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
+          test "$TAG" = "$LIB" || { echo "tag $TAG != build.gradle.kts $LIB"; exit 1; }
+
+      - name: Unit tests and release build
+        run: ./gradlew :unilitix-sdk:testDebugUnitTest :unilitix-sdk:assembleRelease
+
       - name: Publish to Maven Central
-        run: ./gradlew publishToSonatype closeSonatypeStagingRepository
+        run: ./gradlew publishToSonatype closeAndReleaseSonatypeStagingRepository
         env:
           MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
           MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}

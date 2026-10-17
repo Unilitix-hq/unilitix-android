@@ -15,6 +15,7 @@ import io.unilitix.sdk.context.collectDeviceInfo
 import io.unilitix.sdk.context.collectNetworkInfo
 import io.unilitix.sdk.core.Breadcrumbs
 import io.unilitix.sdk.core.EventBuffer
+import io.unilitix.sdk.core.Fingerprint
 import io.unilitix.sdk.core.Identity
 import io.unilitix.sdk.core.Session
 import io.unilitix.sdk.core.SessionManager
@@ -32,6 +33,8 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
@@ -89,6 +92,54 @@ object Unilitix {
             internal.emitEvent(UnilitixEvent(type = "NAVIGATE", screen = screenName))
         }
     }
+
+    /**
+     * Records an error the host app (or a bridge such as React Native) caught
+     * itself. [fatal] = false emits a non-fatal `EXCEPTION`; [fatal] = true
+     * emits a `CRASH`, marks the session crashed and persists it before
+     * returning (bounded to [FATAL_PERSIST_TIMEOUT_MS]), so a caller that is
+     * about to let the process die can do so safely.
+     *
+     * [platform] names where the error came from (`"android"`, `"js"`) and
+     * travels in the exception message prefix, as the Flutter SDK does for
+     * native crashes.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun recordException(
+        type: String,
+        message: String,
+        stackTrace: String,
+        fatal: Boolean,
+        platform: String = "android"
+    ) {
+        val internal = instance ?: run {
+            Logger.w("Unilitix.recordException() called before init()")
+            return
+        }
+        if (internal.optedOut) return
+        internal.recordException(type, message, stackTrace, fatal, platform)
+    }
+
+    /**
+     * Adds a breadcrumb to the trail attached to the next crash or exception
+     * report (last 50 kept). Use it for app state that explains a crash —
+     * never for personal data.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun addBreadcrumb(message: String, category: String = "custom") {
+        val internal = instance ?: return
+        if (internal.optedOut) return
+        internal.breadcrumbs.add(category, internal.breadcrumbs.lastScreen(), message)
+    }
+
+    /** True once [init] has run; bridges use it to decide whether to forward calls. */
+    @JvmStatic
+    val isInitialized: Boolean
+        get() = instance != null
+
+    internal const val FATAL_PERSIST_TIMEOUT_MS = 2_000L
 
     @JvmStatic
     fun startSession() {
@@ -317,6 +368,47 @@ internal class UnilitixInternal(
         }
     }
 
+    /** See [Unilitix.recordException]. */
+    internal fun recordException(
+        type: String,
+        message: String,
+        stackTrace: String,
+        fatal: Boolean,
+        platform: String
+    ) {
+        val title = "$type: $message".take(200)
+        val props = mapOf<String, Any>(
+            "exception_type" to type,
+            "exception_message" to "[$platform] $message",
+            "stack_trace" to stackTrace.take(16_000),
+            "breadcrumbs" to breadcrumbs.toWire(),
+            "fatal" to fatal,
+            "title" to title,
+            "fingerprint" to Fingerprint.of(type, stackTrace)
+        )
+        val event = UnilitixEvent(
+            type = if (fatal) "CRASH" else "EXCEPTION",
+            screen = breadcrumbs.lastScreen(),
+            properties = props
+        )
+        if (!fatal) {
+            scope.launch { emitEvent(event) }
+            return
+        }
+        sessionManager.markCrashed()
+        // The caller is about to hand the error to a handler that kills the
+        // process: get the report into the on-device queue first, bounded so
+        // a stuck disk cannot hold the crash open.
+        val persisted = runBlocking {
+            withTimeoutOrNull(Unilitix.FATAL_PERSIST_TIMEOUT_MS) {
+                emitEvent(event)
+                flushNow()
+                true
+            }
+        }
+        if (persisted != true) Logger.w("Unilitix: fatal report not persisted within budget")
+    }
+
     internal suspend fun emitEvent(event: UnilitixEvent) {
         if (optedOut) return
         val networkType = networkMonitor.currentType()
@@ -433,7 +525,7 @@ internal class UnilitixInternal(
     }
 
     private fun eventToMap(event: UnilitixEvent): Map<String, Any?> {
-        val knownTypes = setOf("TAP", "NAVIGATE", "RAGE_TAP", "CRASH", "SCROLL")
+        val knownTypes = setOf("TAP", "NAVIGATE", "RAGE_TAP", "CRASH", "EXCEPTION", "SCROLL")
         val type = if (event.type in knownTypes) event.type else "CUSTOM"
 
         val props = event.properties
@@ -449,11 +541,16 @@ internal class UnilitixInternal(
         map["capturedOffline"]  = event.capturedOffline
         map["networkAtCapture"] = event.networkAtCapture
 
-        if (type == "CRASH") {
+        if (type == "CRASH" || type == "EXCEPTION") {
             map["stackTrace"]    = props["stack_trace"] as? String ?: ""
             map["exceptionType"] = props["exception_type"] as? String ?: ""
             map["exceptionMessage"] = props["exception_message"] as? String ?: ""
             map["breadcrumbs"]   = props["breadcrumbs"]
+            map["fatal"]         = props["fatal"] as? Boolean ?: (type == "CRASH")
+            (props["title"] as? String)?.let { map["title"] = it }
+            (props["fingerprint"] as? String)?.let {
+                map["metadata"] = mapOf("fingerprint" to it)
+            }
         }
 
         // For CUSTOM events, put the original name + remaining props into metadata
