@@ -5,8 +5,12 @@ import kotlin.math.abs
 internal data class TapRecord(val x: Float, val y: Float, val screen: String, val timestampMs: Long)
 
 internal class RageTapDetector(
+    /** Display density, so the radius is the contract's 100 dp on every screen. */
+    density: Float = 1f,
     private val onRageTap: (screen: String, x: Float, y: Float) -> Unit
 ) {
+    private val radiusPx = RADIUS_DP * density
+
     private val recentTaps = mutableListOf<TapRecord>()
 
     fun recordTap(x: Float, y: Float, screen: String): Boolean {
@@ -16,7 +20,7 @@ internal class RageTapDetector(
         recentTaps.add(TapRecord(x, y, screen, now))
 
         val clusterTaps = recentTaps.filter { tap ->
-            tap.screen == screen && abs(tap.x - x) <= RADIUS_PX && abs(tap.y - y) <= RADIUS_PX
+            tap.screen == screen && abs(tap.x - x) <= radiusPx && abs(tap.y - y) <= radiusPx
         }
 
         if (clusterTaps.size >= MIN_TAPS) {
@@ -31,8 +35,8 @@ internal class RageTapDetector(
     }
 
     companion object {
-        private const val WINDOW_MS = 1_000L
-        private const val RADIUS_PX = 100f
-        private const val MIN_TAPS = 3
+        internal const val WINDOW_MS = 1_000L
+        internal const val RADIUS_DP = 100f
+        internal const val MIN_TAPS = 3
     }
 }

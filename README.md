@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("io.unilitix:unilitix-android:1.0.0")
+implementation("io.unilitix:unilitix-android:1.5.0")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -74,7 +74,7 @@ Unilitix.trackScreen("CheckoutScreen")
 
 ```kotlin
 Unilitix.init(this, "ul_live_xxx") {
-    apiUrl = "https://api.unilitix.io"          // backend URL
+    apiUrl = "https://api.unilitix.com"         // backend URL
     autoTrackScreens = true                    // auto-capture Activity/Fragment
     autoTrackTaps = true                       // auto-capture touch events
     autoTrackCrashes = true                    // auto-capture uncaught exceptions
