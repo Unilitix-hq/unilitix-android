@@ -248,7 +248,7 @@ internal class UnilitixInternal(
 
         if (config.autoTrackTaps) {
             val rageTapDetector = if (config.autoTrackRageTaps) {
-                RageTapDetector { screen, x, y ->
+                RageTapDetector(application.resources.displayMetrics.density) { screen, x, y ->
                     scope.launch {
                         emitEvent(
                             UnilitixEvent(

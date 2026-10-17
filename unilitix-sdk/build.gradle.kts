@@ -15,7 +15,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.4.2\"")
+        buildConfigField("String", "SDK_VERSION", "\"1.5.0\"")
     }
 
     buildTypes {
@@ -74,7 +74,7 @@ publishing {
         create<MavenPublication>("release") {
             groupId = "com.unilitix"
             artifactId = "unilitix-android"
-            version = "1.4.2"
+            version = "1.5.0"
 
             afterEvaluate {
                 from(components["release"])

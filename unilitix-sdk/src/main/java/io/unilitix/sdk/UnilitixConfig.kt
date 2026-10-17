@@ -49,7 +49,7 @@ data class UnilitixConfig internal constructor(
 ) {
     /** DSL + Java builder. Var properties support Kotlin `property = value` syntax. */
     class Builder {
-        var apiUrl: String = "https://api.unilitix.io"
+        var apiUrl: String = "https://api.unilitix.com"
         var autoTrackScreens: Boolean = true
         var autoTrackTaps: Boolean = true
         var autoTrackCrashes: Boolean = true

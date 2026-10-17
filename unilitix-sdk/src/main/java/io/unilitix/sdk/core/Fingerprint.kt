@@ -10,10 +10,15 @@ package io.unilitix.sdk.core
  * Handles JVM frames (`at com.foo.Bar.baz(Bar.kt:12)`), Hermes / JavaScript
  * frames (`at baz (address at index.android.bundle:1:2345)`) and Dart
  * frames (`#0 Foo.bar (package:app/foo.dart:12:5)`).
+ *
+ * JVM frames must start with `at`: otherwise a message line such as
+ * `TypeError: x is not an object (evaluating 'a.b')` counts as a frame and
+ * the fingerprint changes with the message. The reference implementation and
+ * test vectors are in the api repo (internal/sdkcontract/fingerprint.go).
  */
 internal object Fingerprint {
 
-    private val jvmLine = Regex("""^(?:at\s+)?(.*?)\(([^:()]+)(?::\d+)?\)$""")
+    private val jvmLine = Regex("""^at\s+(.*?)\(([^:()]+)(?::\d+)?\)$""")
     private val jsLine = Regex("""^at\s+(.*?)\s*\((.*?)(?::\d+)+\)$""")
     private val dartLine = Regex("""^#\d+\s+(.*?)\s*\((.*?)(?::\d+)+\)$""")
     private val dartVirt = Regex("""virt\s+([0-9a-f]+)""")
