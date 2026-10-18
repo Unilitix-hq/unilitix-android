@@ -40,7 +40,7 @@ internal class Identity(private val context: Context) {
         } catch (e: Exception) {
             Log.w("Unilitix", "Identity: failed to persist userId: ${e.message}")
         }
-        Logger.d("Identity: identified as $userId")
+        Logger.d("Identity: user identified (${traits.size} traits)")
     }
 
     fun reset() {
@@ -53,7 +53,7 @@ internal class Identity(private val context: Context) {
         }
         devicePrefs.edit().remove(KEY_ANONYMOUS_ID).apply()
         anonymousId = generateAndSaveAnonymousId()
-        Logger.d("Identity: reset, new anonymousId=$anonymousId")
+        Logger.d("Identity: reset, new anonymous ID generated")
     }
 
     private fun buildEncryptedPrefs(): SharedPreferences {

@@ -24,7 +24,9 @@ internal class CrashHandler(
     private val breadcrumbs: Breadcrumbs,
     private val database: EventDatabase,
     private val getCurrentSessionJson: () -> String?,
-    private val onCrash: () -> Unit
+    private val onCrash: () -> Unit,
+    /** False while consent is denied: the crash is passed on, not recorded. */
+    private val isEnabled: () -> Boolean = { true }
 ) : Thread.UncaughtExceptionHandler {
 
     private val originalHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -42,6 +44,7 @@ internal class CrashHandler(
 
     override fun uncaughtException(thread: Thread, throwable: Throwable) {
         try {
+            if (!isEnabled()) return // finally still hands the crash to the original handler
             onCrash()
 
             val stackTrace = throwable.stackTraceToString().take(16_000)

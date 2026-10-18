@@ -14,6 +14,10 @@ import io.unilitix.sdk.context.NetworkMonitor
 import io.unilitix.sdk.context.collectDeviceInfo
 import io.unilitix.sdk.context.collectNetworkInfo
 import io.unilitix.sdk.core.Breadcrumbs
+import io.unilitix.sdk.core.ConsentController
+import io.unilitix.sdk.core.ConsentEffects
+import io.unilitix.sdk.core.ConsentStore
+import io.unilitix.sdk.core.SharedPreferencesStore
 import io.unilitix.sdk.core.EventBuffer
 import io.unilitix.sdk.core.Fingerprint
 import io.unilitix.sdk.core.Identity
@@ -34,6 +38,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -44,24 +50,63 @@ object Unilitix {
     @Volatile
     internal var instance: UnilitixInternal? = null
 
+    /**
+     * Initializes the SDK. Call once, in `Application.onCreate`.
+     * Consent starts as the persisted decision, else
+     * [UnilitixConfig.Builder.consent] (default [UnilitixConsent.GRANTED]).
+     */
     @JvmStatic
+    @JvmOverloads
     fun init(application: Application, apiKey: String, configure: UnilitixConfig.Builder.() -> Unit = {}) {
+        initWith(application, apiKey, null, configure)
+    }
+
+    /**
+     * Initializes the SDK with an initial [consent] state, used only when the
+     * user has not decided on this device yet: a decision persisted by
+     * [setConsent] (or [optOut] / [optIn]) on an earlier launch wins.
+     *
+     * ```kotlin
+     * Unilitix.init(this, "ul_live_xxx", consent = UnilitixConsent.PENDING) { }
+     * // after the user accepts:
+     * Unilitix.setConsent(UnilitixConsent.GRANTED)
+     * ```
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun init(
+        application: Application,
+        apiKey: String,
+        consent: UnilitixConsent,
+        configure: UnilitixConfig.Builder.() -> Unit = {}
+    ) {
+        initWith(application, apiKey, consent, configure)
+    }
+
+    private fun initWith(
+        application: Application,
+        apiKey: String,
+        consent: UnilitixConsent?,
+        configure: UnilitixConfig.Builder.() -> Unit
+    ) {
         if (instance != null) {
             Logger.w("Unilitix.init() called more than once — ignoring")
             return
         }
-        val config = UnilitixConfig.Builder().apply(configure).build()
-        // In release builds BuildConfig.DEBUG is false, so this assignment is a no-op and
-        // debug logs can never be enabled regardless of what the host app configures.
-        if (BuildConfig.DEBUG) Logger.debugEnabled = config.debugLogging
+        val builder = UnilitixConfig.Builder().apply(configure)
+        val initialConsent = consent ?: builder.consent
+        val config = builder.build()
+        // Applies in release builds of the library too (it used to be gated on
+        // the library's own BuildConfig.DEBUG, which is false in the AAR).
+        Logger.configure(config.debugLogging)
         if (config.sessionTimeoutSeconds < 60) {
             Logger.w("Unilitix: sessionTimeoutSeconds=${config.sessionTimeoutSeconds} is very low — consider 1800 (30 min) to avoid session fragmentation")
         }
 
-        val internal = UnilitixInternal(application, apiKey, config)
+        val internal = UnilitixInternal(application, apiKey, config, initialConsent)
         instance = internal
         internal.start()
-        Logger.d("✅ Unilitix SDK initialized | key=${apiKey.take(8)}... | session=${internal.sessionManager.currentSession?.id?.take(8)} | v${BuildConfig.SDK_VERSION}")
+        Logger.d("✅ Unilitix SDK initialized | key=${Logger.keyLabel(apiKey)} | consent=${internal.consent.state.value} | session=${internal.sessionManager.currentSession?.id?.take(8)} | v${BuildConfig.SDK_VERSION}")
     }
 
     @JvmStatic
@@ -159,22 +204,44 @@ object Unilitix {
         }
     }
 
+    /**
+     * The current consent state. Before [init] this is
+     * [UnilitixConsent.GRANTED] (the contract default).
+     */
     @JvmStatic
-    fun optOut() {
-        val internal = instance ?: return
-        internal.optedOut = true
-        internal.persistOptOut(true)
-        internal.batteryInfo.stopObserving()
-        Logger.d("Unilitix: opted out (persisted)")
+    val consent: UnilitixConsent
+        get() = instance?.consent?.state ?: UnilitixConsent.GRANTED
+
+    /**
+     * Records the user's consent decision (persisted across launches) and acts
+     * on it immediately:
+     * * [UnilitixConsent.GRANTED]: uploads resume and everything held while
+     *   pending is sent.
+     * * [UnilitixConsent.PENDING]: capture continues into the on-device queue;
+     *   nothing is uploaded or deleted.
+     * * [UnilitixConsent.DENIED]: capture stops and everything queued on the
+     *   device (events, snapshots, screenshots, pending crash) is deleted.
+     */
+    @JvmStatic
+    fun setConsent(consent: UnilitixConsent) {
+        val internal = instance ?: run {
+            Logger.w("Unilitix.setConsent() called before init() — ignoring; pass consent to init() instead")
+            return
+        }
+        val before = internal.consent.set(consent)
+        Logger.d("Unilitix: consent ${before.value} → ${consent.value} (persisted)")
     }
 
+    /** Stops all tracking and deletes queued data. Same as `setConsent(UnilitixConsent.DENIED)`. */
+    @JvmStatic
+    fun optOut() {
+        setConsent(UnilitixConsent.DENIED)
+    }
+
+    /** Resumes tracking. Same as `setConsent(UnilitixConsent.GRANTED)`. */
     @JvmStatic
     fun optIn() {
-        val internal = instance ?: return
-        internal.optedOut = false
-        internal.persistOptOut(false)
-        internal.batteryInfo.startObserving()
-        Logger.d("Unilitix: opted in (persisted)")
+        setConsent(UnilitixConsent.GRANTED)
     }
 
     @JvmStatic
@@ -190,8 +257,9 @@ object Unilitix {
 internal class UnilitixInternal(
     private val application: Application,
     private val apiKey: String,
-    internal val config: UnilitixConfig
-) {
+    internal val config: UnilitixConfig,
+    initialConsent: UnilitixConsent = UnilitixConsent.GRANTED
+) : ConsentEffects {
     internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     internal val identity = Identity(application)
@@ -206,11 +274,15 @@ internal class UnilitixInternal(
 
     private val prefs = application.getSharedPreferences("unilitix_prefs", android.content.Context.MODE_PRIVATE)
 
-    @Volatile internal var optedOut = prefs.getBoolean("opt_out", false)
+    /** Consent state; persisted in unilitix_prefs (migrates the 1.5.0 `opt_out` flag). */
+    internal val consent = ConsentController(ConsentStore(SharedPreferencesStore(prefs)), initialConsent, this)
 
-    internal fun persistOptOut(value: Boolean) {
-        prefs.edit().putBoolean("opt_out", value).apply()
-    }
+    /** True when nothing may be captured (consent denied). */
+    internal val optedOut: Boolean
+        get() = !consent.canCapture
+
+    /** Serializes writes to the on-device queue with the consent purge. */
+    private val queueMutex = Mutex()
 
     internal val snapshotBuffer = SnapshotBuffer(config.maxSnapshotsPerSession)
     private var snapshotCapture: SnapshotCapture? = null
@@ -290,42 +362,48 @@ internal class UnilitixInternal(
                 breadcrumbs = breadcrumbs,
                 database = database,
                 getCurrentSessionJson = { buildSessionJson(sessionManager.currentSession) },
-                onCrash = { sessionManager.markCrashed() }
+                onCrash = { sessionManager.markCrashed() },
+                isEnabled = { consent.canCapture }
             ).install()
         }
 
         recoverPendingCrash()
 
         if (config.captureSnapshots) {
-            snapshotCapture = SnapshotCapture(config) { snapshot ->
-                snapshotBuffer.add(snapshot)
+            snapshotCapture = SnapshotCapture(config, isEnabled = { consent.canCapture }) { snapshot ->
+                if (consent.canCapture) snapshotBuffer.add(snapshot)
             }
             application.registerActivityLifecycleCallbacks(snapshotCapture!!)
         }
 
         if (config.captureScreenshots) {
-            screenshotCapture = ScreenshotCapture(config) { screenshot ->
+            screenshotCapture = ScreenshotCapture(config, isEnabled = { consent.canCapture }) { screenshot ->
                 scope.launch {
                     val sessionId = sessionManager.currentSession?.id?.toString() ?: return@launch
-                    database.screenshotDao().insert(
-                        PendingScreenshot(
-                            sessionId = sessionId,
-                            ordinal = screenshot.ordinal,
-                            screenName = screenshot.screenName,
-                            viewportWidth = screenshot.viewportWidth,
-                            viewportHeight = screenshot.viewportHeight,
-                            capturedAt = screenshot.capturedAt,
-                            imageBytes = screenshot.imageBytes,
+                    queueMutex.withLock {
+                        if (!consent.canCapture) return@withLock
+                        database.screenshotDao().insert(
+                            PendingScreenshot(
+                                sessionId = sessionId,
+                                ordinal = screenshot.ordinal,
+                                screenName = screenshot.screenName,
+                                viewportWidth = screenshot.viewportWidth,
+                                viewportHeight = screenshot.viewportHeight,
+                                capturedAt = screenshot.capturedAt,
+                                imageBytes = screenshot.imageBytes,
+                            )
                         )
-                    )
-                    val count = database.screenshotDao().count()
-                    if (count > config.maxScreenshotsPerSession) {
-                        database.screenshotDao().deleteOldest(count - config.maxScreenshotsPerSession)
+                        val count = database.screenshotDao().count()
+                        if (count > config.maxScreenshotsPerSession) {
+                            database.screenshotDao().deleteOldest(count - config.maxScreenshotsPerSession)
+                        }
                     }
                 }
             }
             application.registerActivityLifecycleCallbacks(screenshotCapture!!)
         }
+
+        if (!consent.canCapture) batteryInfo.stopObserving()
 
         performanceMonitor.start()
 
@@ -352,6 +430,10 @@ internal class UnilitixInternal(
         scope.launch {
             val file = File(application.cacheDir, "unilitix_crash_pending.json")
             if (!file.exists()) return@launch
+            if (!consent.canCapture) {
+                file.delete()
+                return@launch
+            }
             try {
                 val obj = org.json.JSONObject(file.readText())
                 database.eventDao().insert(
@@ -427,6 +509,7 @@ internal class UnilitixInternal(
 
     internal suspend fun flushNow(session: Session? = null) {
         val events = eventBuffer.drain()
+        if (!consent.canCapture) return // denied: drop whatever was buffered
         if (events.isEmpty() && session == null) return
 
         val activeSession = session ?: sessionManager.currentSession ?: return
@@ -434,25 +517,68 @@ internal class UnilitixInternal(
         val sessionJson = buildSessionJson(activeSession)
         val eventsJson = Json.toJson(events.map { eventToMap(it) })
 
-        val count = database.eventDao().count()
-        if (count >= config.maxOfflineEvents) {
-            val overflow = count - config.maxOfflineEvents + 1
-            database.eventDao().deleteOldest(overflow)
-            Logger.w("Unilitix: event DB overflow, dropped $overflow oldest events")
-        }
-
         val batchNetwork = networkMonitor.currentType()
-        database.eventDao().insert(
-            PendingEvent(
-                sessionJson = sessionJson,
-                eventsJson = eventsJson,
-                capturedOffline = events.any { it.capturedOffline },
-                networkAtCapture = batchNetwork
+        val persisted = queueMutex.withLock {
+            // Re-checked under the lock: a denial purges under the same lock.
+            if (!consent.canCapture) return@withLock false
+            val count = database.eventDao().count()
+            if (count >= config.maxOfflineEvents) {
+                val overflow = count - config.maxOfflineEvents + 1
+                database.eventDao().deleteOldest(overflow)
+                Logger.w("Unilitix: event DB overflow, dropped $overflow oldest events")
+            }
+            database.eventDao().insert(
+                PendingEvent(
+                    sessionJson = sessionJson,
+                    eventsJson = eventsJson,
+                    capturedOffline = events.any { it.capturedOffline },
+                    networkAtCapture = batchNetwork
+                )
             )
-        )
+            true
+        }
+        if (!persisted) return
 
-        flushScheduler.scheduleFlush()
+        // While consent is pending the batch stays queued; releaseHeld()
+        // schedules the upload once consent is granted.
+        if (consent.canUpload) flushScheduler.scheduleFlush()
         Logger.d("Unilitix: persisted ${events.size} events for session ${activeSession.id}")
+    }
+
+    // ── ConsentEffects ────────────────────────────────────────────────
+
+    override fun startCapture() {
+        batteryInfo.startObserving()
+    }
+
+    override fun stopCapture() {
+        batteryInfo.stopObserving()
+    }
+
+    override fun purgeLocalData() {
+        breadcrumbs.clear()
+        snapshotBuffer.drain()
+        flushScheduler.cancelPending()
+        scope.launch {
+            eventBuffer.drain()
+            queueMutex.withLock {
+                try {
+                    database.eventDao().deleteAll()
+                    database.screenshotDao().deleteAll()
+                    File(application.cacheDir, "unilitix_crash_pending.json").delete()
+                    Logger.d("Unilitix: consent denied — on-device queue purged")
+                } catch (e: Exception) {
+                    Logger.w("Unilitix: failed to purge on-device queue: ${e.message}")
+                }
+            }
+        }
+    }
+
+    override fun releaseHeld() {
+        scope.launch {
+            flushNow()
+            flushScheduler.scheduleFlush()
+        }
     }
 
     fun shouldSample(): Boolean {

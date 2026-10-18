@@ -32,11 +32,16 @@ internal class ApiClient(
         .writeTimeout(30, TimeUnit.SECONDS)
         .applyCertPinning()
         .apply {
-            // Compile-time guard — BODY logging cannot be enabled in release builds regardless
-            // of what the host app sets in UnilitixConfig.debugLogging.
+            // HTTP header logging exists only in debug builds of the library itself
+            // (never in the published AAR), and is further gated on debugLogging via
+            // Logger.d. Bodies are never logged; the API key header is redacted.
             if (BuildConfig.DEBUG) {
                 addInterceptor(HttpLoggingInterceptor { Logger.d("OkHttp: $it") }.apply {
                     level = HttpLoggingInterceptor.Level.HEADERS
+                    redactHeader("x-unilitix-key")
+                    redactHeader("Authorization")
+                    redactHeader("Cookie")
+                    redactHeader("Set-Cookie")
                 })
                 addInterceptor(RedactingLoggingInterceptor())
             }
@@ -61,7 +66,8 @@ internal class ApiClient(
     }
 
     suspend fun ingest(payload: String): ApiResult {
-        Logger.d("ApiClient payload (${payload.length} chars): ${payload.take(500)}")
+        // Never log the payload itself: it carries user IDs and traits.
+        Logger.d("ApiClient: ingest payload ${payload.length} chars")
         val request = Request.Builder()
             .url("$apiUrl/v1/ingest/session")
             .post(payload.toRequestBody(json))

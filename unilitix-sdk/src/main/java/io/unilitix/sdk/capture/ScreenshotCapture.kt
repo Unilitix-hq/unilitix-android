@@ -25,6 +25,8 @@ import java.util.concurrent.Executors
 
 internal class ScreenshotCapture(
     private val config: UnilitixConfig,
+    /** False while consent is denied: nothing is captured. */
+    private val isEnabled: () -> Boolean = { true },
     private val onScreenshot: (Screenshot) -> Unit,
 ) : Application.ActivityLifecycleCallbacks {
 
@@ -58,6 +60,7 @@ internal class ScreenshotCapture(
     }
 
     private fun capture(activity: Activity) {
+        if (!isEnabled()) return
         if (ordinal >= config.maxScreenshotsPerSession) return
 
         val rootView = activity.window.decorView.rootView

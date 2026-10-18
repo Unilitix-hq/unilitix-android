@@ -1,7 +1,5 @@
 package io.unilitix.sdk
 
-import io.unilitix.sdk.BuildConfig
-
 /**
  * Immutable SDK configuration. Construct via [Builder] (Kotlin DSL or Java fluent API).
  *
@@ -58,7 +56,19 @@ data class UnilitixConfig internal constructor(
         var flushBatchSize: Int = 100
         var maxOfflineEvents: Int = 1000
         var sessionTimeoutSeconds: Int = 1800
-        var debugLogging: Boolean = BuildConfig.DEBUG
+        /**
+         * Verbose SDK logs (tag `Unilitix`). Default false; works in release
+         * builds of your app. Payloads, user IDs, traits and the API key are
+         * never logged. Warnings and errors are always logged.
+         */
+        var debugLogging: Boolean = false
+        /**
+         * Consent state used when the user has not decided yet on this device;
+         * a decision persisted by [Unilitix.setConsent] on an earlier launch
+         * wins. Default [UnilitixConsent.GRANTED]. The `consent` argument of
+         * `Unilitix.init(app, key, consent) { }` overrides this.
+         */
+        var consent: UnilitixConsent = UnilitixConsent.GRANTED
         var maskInputs: Boolean = true
         var maskedViewIds: Set<Int> = emptySet()
         var sampleRate: Double = 1.0
@@ -85,6 +95,7 @@ data class UnilitixConfig internal constructor(
         fun maxOfflineEvents(v: Int)               = apply { maxOfflineEvents = v }
         fun sessionTimeoutSeconds(v: Int)          = apply { sessionTimeoutSeconds = v }
         fun debugLogging(v: Boolean)               = apply { debugLogging = v }
+        fun consent(v: UnilitixConsent)            = apply { consent = v }
         fun maskInputs(v: Boolean)                 = apply { maskInputs = v }
         fun maskedViewIds(v: Set<Int>)             = apply { maskedViewIds = v }
         fun sampleRate(v: Double)                  = apply { sampleRate = v }
