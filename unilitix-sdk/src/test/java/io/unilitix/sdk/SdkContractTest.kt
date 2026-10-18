@@ -28,9 +28,9 @@ class SdkContractTest {
         val c = UnilitixConfig.Builder().build()
         val actual: Map<String, Any> = mapOf(
             "apiUrl" to c.apiUrl,
-            // Defaults to the library's BuildConfig.DEBUG: false in the
-            // published release AAR, true in this debug unit-test build.
-            "debugLogging" to (c.debugLogging && !BuildConfig.DEBUG),
+            "debugLogging" to c.debugLogging,
+            // Builder-only: the initial state when the user has not decided yet.
+            "consent" to UnilitixConfig.Builder().consent.value,
             "autoTrackScreens" to c.autoTrackScreens,
             "autoTrackTaps" to c.autoTrackTaps,
             "autoTrackCrashes" to c.autoTrackCrashes,

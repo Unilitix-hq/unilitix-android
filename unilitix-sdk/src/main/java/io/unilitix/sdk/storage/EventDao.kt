@@ -25,6 +25,9 @@ internal interface EventDao {
     @Query("UPDATE pending_events SET sync_failed_batches = sync_failed_batches + 1 WHERE id = :id")
     suspend fun incrementSyncFailedBatches(id: Long)
 
+    @Query("DELETE FROM pending_events")
+    suspend fun deleteAll()
+
     @Query("SELECT COUNT(*) FROM pending_events")
     suspend fun count(): Int
 

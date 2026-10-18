@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.5.1 — 2026-10-18
+
+### Fixed
+- **`debugLogging` works in release builds.** It was applied only when the
+  library's own `BuildConfig.DEBUG` was true, which is never the case in the
+  published AAR, so SDK logs could not be turned on in an app. The default is
+  now `false` (it was the library's `BuildConfig.DEBUG`), as the shared SDK
+  contract specifies; set `debugLogging = true` to see SDK logs. Warnings and
+  errors are logged as before.
+- **Debug logs no longer contain personal data or secrets.** The ingest
+  payload (which can contain user IDs, traits and emails) is no longer logged,
+  only its size; `identify()` no longer logs the user ID; the init line shows
+  only the API key's type prefix (`ul_live_…`). The debug-build HTTP logger
+  redacts the `x-unilitix-key` header.
+
+### Added
+- **Consent states** (contract: `granted | pending | denied`, default
+  `granted`): `enum class UnilitixConsent { GRANTED, PENDING, DENIED }`,
+  `Unilitix.setConsent(consent)`, `Unilitix.consent`,
+  `Unilitix.init(app, apiKey, consent) { … }` and
+  `UnilitixConfig.Builder.consent`.
+  - `PENDING`: events, snapshots and screenshots are captured to the
+    on-device queue but nothing is uploaded until a decision.
+  - `GRANTED`: uploads normally, including everything held while pending.
+  - `DENIED`: capture stops and everything queued on the device (event
+    batches, in-memory snapshots, screenshots, a pending crash report,
+    breadcrumbs) is deleted.
+  - The decision is persisted; on later launches it wins over the value
+    passed to `init`. The WorkManager flush worker and the snapshot and
+    screenshot uploaders check consent before every upload.
+
+### Changed
+- `optOut()` / `optIn()` are now aliases for `setConsent(DENIED)` /
+  `setConsent(GRANTED)`. **`optOut()` now also deletes data already queued on
+  the device** (it used to only stop new capture), and crashes are no longer
+  recorded while opted out. The 1.5.0 persisted opt-out flag is migrated:
+  opted-out users stay `DENIED`.
+- `Unilitix.init(app, apiKey)` without a configuration lambda is now callable
+  from Java.
+
 ## 1.5.0 — 2026-10-18
 
 Conforms to more of the shared SDK contract (v1.0.0).

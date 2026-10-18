@@ -35,6 +35,12 @@ internal class Breadcrumbs {
     @Synchronized
     fun snapshot(): List<Breadcrumb> = buffer.toList()
 
+    /** Drops the whole trail (consent denied). */
+    @Synchronized
+    fun clear() {
+        buffer.clear()
+    }
+
     /** The screen of the most recent breadcrumb that had one. */
     @Synchronized
     fun lastScreen(): String? = buffer.lastOrNull { it.screen != null }?.screen

@@ -3,6 +3,7 @@
 -keep public class io.unilitix.sdk.UnilitixConfig { *; }
 -keep public class io.unilitix.sdk.UnilitixConfig$Builder { *; }
 -keep public @interface io.unilitix.sdk.UnilitixPrivate
+-keep public enum io.unilitix.sdk.UnilitixConsent { *; }
 -keepclassmembers class ** {
     @io.unilitix.sdk.UnilitixPrivate *;
 }

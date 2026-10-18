@@ -16,6 +16,9 @@ internal interface ScreenshotDao {
     @Query("DELETE FROM pending_screenshots WHERE id = :id")
     suspend fun deleteById(id: Long)
 
+    @Query("DELETE FROM pending_screenshots")
+    suspend fun deleteAll()
+
     @Query("SELECT COUNT(*) FROM pending_screenshots")
     suspend fun count(): Int
 

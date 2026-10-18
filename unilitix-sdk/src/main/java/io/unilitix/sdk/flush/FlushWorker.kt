@@ -21,6 +21,14 @@ internal class FlushWorker(context: Context, params: WorkerParameters) : Corouti
             return Result.success()
         }
 
+        // Consent gate: nothing leaves the device unless consent is granted.
+        // Pending batches and screenshots stay queued; Unilitix.setConsent(GRANTED)
+        // schedules this worker again, DENIED purges the queue.
+        if (!sdk.consent.canUpload) {
+            Logger.d("FlushWorker: consent ${sdk.consent.state.value} — holding queue, nothing uploaded")
+            return Result.success()
+        }
+
         val db = EventDatabase.getInstance(applicationContext)
         val dao = db.eventDao()
 
@@ -35,6 +43,11 @@ internal class FlushWorker(context: Context, params: WorkerParameters) : Corouti
         var allSucceeded = true
 
         for (event in pending) {
+            // Consent can change mid-run: re-check before every upload.
+            if (!sdk.consent.canUpload) {
+                Logger.d("FlushWorker: consent changed — stopping upload")
+                return Result.success()
+            }
             dao.incrementSyncAttempts(event.id)
             val syncAttempts = event.syncAttempts + 1
 
@@ -48,7 +61,7 @@ internal class FlushWorker(context: Context, params: WorkerParameters) : Corouti
                     Logger.d("FlushWorker: batch ${event.id} sent (attempt $syncAttempts)")
                     val serverSessionId = result.sessionId
                     if (serverSessionId.isNotEmpty()) {
-                        val snapshots = sdk.snapshotBuffer.drain()
+                        val snapshots = if (sdk.consent.canUpload) sdk.snapshotBuffer.drain() else emptyList()
                         if (snapshots.isNotEmpty()) {
                             sdk.apiClient.uploadSnapshots(serverSessionId, snapshots)
                         }
@@ -82,6 +95,7 @@ internal class FlushWorker(context: Context, params: WorkerParameters) : Corouti
 
     private suspend fun flushScreenshots(sdk: io.unilitix.sdk.UnilitixInternal, db: EventDatabase) {
         if (!sdk.config.captureScreenshots) return
+        if (!sdk.consent.canUpload) return
 
         val screenshotDao = db.screenshotDao()
         val pending = screenshotDao.getOldest(SCREENSHOT_BATCH_LIMIT)

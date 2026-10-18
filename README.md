@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("io.unilitix:unilitix-android:1.5.0")
+implementation("com.unilitix:unilitix-android:1.5.1")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -67,8 +67,46 @@ Unilitix.trackScreen("CheckoutScreen")
 ## Privacy
 
 - All `EditText` fields with `inputType=password` are auto-masked — coordinates recorded as `[MASKED]`
-- Call `Unilitix.optOut()` to disable all tracking (persists across app restarts)
-- Call `Unilitix.optIn()` to re-enable tracking
+- Consent (below) controls what is captured and uploaded
+
+### Consent
+
+The SDK has three consent states (`UnilitixConsent`), shared by every Unilitix SDK:
+
+| State | Capture | Upload | On-device queue |
+|---|---|---|---|
+| `GRANTED` (default) | yes | yes | sent as usual |
+| `PENDING` | yes, to the on-device queue | nothing (events, snapshots, screenshots) | held until a decision |
+| `DENIED` | nothing | nothing | deleted (events, snapshots, screenshots, pending crash) |
+
+Apps that show a consent screen after launch (NDPR / GDPR) start in `PENDING`:
+
+```kotlin
+Unilitix.init(this, "ul_live_xxx", consent = UnilitixConsent.PENDING) {
+    // other options
+}
+
+// after the user answers:
+Unilitix.setConsent(UnilitixConsent.GRANTED)   // sends everything held while pending
+Unilitix.setConsent(UnilitixConsent.DENIED)    // stops capture and deletes the queue
+
+Unilitix.consent                               // current state
+```
+
+Java:
+
+```java
+Unilitix.init(app, "ul_live_xxx", UnilitixConsent.PENDING);
+Unilitix.setConsent(UnilitixConsent.GRANTED);
+UnilitixConsent current = Unilitix.getConsent();
+```
+
+The decision passed to `setConsent` is persisted: on later launches it wins over the
+value passed to `init` (which only applies until the user has decided on this device).
+`Unilitix.optOut()` and `Unilitix.optIn()` are shorthands for `setConsent(DENIED)` and
+`setConsent(GRANTED)`; users who opted out with an earlier SDK version stay `DENIED`.
+Snapshots held while pending are kept in memory only (bounded by
+`maxSnapshotsPerSession`) and are lost if the process dies before consent is granted.
 
 ## Configuration
 
@@ -83,7 +121,8 @@ Unilitix.init(this, "ul_live_xxx") {
     flushBatchSize = 100                       // send when buffer reaches this size
     maxOfflineEvents = 1000                    // max events stored offline
     sessionTimeoutSeconds = 30                 // background time before new session
-    debugLogging = false                       // verbose OkHttp + SDK logs
+    debugLogging = false                       // verbose SDK logs (logcat tag "Unilitix"); works in release builds
+    consent = UnilitixConsent.GRANTED          // initial consent if the user has not decided yet
     maskInputs = true                          // mask password fields
     maskedViewIds = setOf(R.id.et_secret)      // additional views to mask
     sampleRate = 1.0                           // 0.5 = track only 50% of users
@@ -100,8 +139,11 @@ Unilitix.trackScreen(screenName)      // manual screen tracking
 Unilitix.startSession()               // force start a new session
 Unilitix.endSession()                 // force end the current session
 Unilitix.flush()                      // immediately send buffered events
-Unilitix.optOut()                     // disable all tracking
-Unilitix.optIn()                      // re-enable tracking
+Unilitix.init(application, apiKey, consent) // initialize with an initial consent state
+Unilitix.setConsent(consent)          // GRANTED / PENDING / DENIED, persisted
+Unilitix.consent                      // current consent state
+Unilitix.optOut()                     // = setConsent(DENIED): stop tracking, delete queued data
+Unilitix.optIn()                      // = setConsent(GRANTED)
 Unilitix.reset()                      // clear identity, start fresh anonymous session
 Unilitix.recordException(type, message, stackTrace, fatal)  // report a caught error (EXCEPTION) or, with fatal=true, a CRASH persisted before you re-throw
 Unilitix.addBreadcrumb(message, category)                   // add to the trail attached to the next crash report (last 50 kept)
@@ -109,6 +151,20 @@ Unilitix.isInitialized                                      // true once init() 
 ```
 
 Crash and exception reports carry a stable `metadata.fingerprint` (exception type + top three frames, line numbers ignored), `title` and `fatal`, so the dashboard counts one bug once across devices. JVM uncaught exceptions are reported as fatal.
+
+## Debug logging
+
+`debugLogging` is off by default. Turn it on to see what the SDK does in logcat (tag
+`Unilitix`), in debug or release builds of your app:
+
+```kotlin
+Unilitix.init(this, "ul_live_xxx") {
+    debugLogging = BuildConfig.DEBUG   // your app's BuildConfig
+}
+```
+
+Debug logs never include event payloads, user IDs, traits or the API key (only its
+`ul_live_` / `ul_test_` prefix). Warnings and errors are always logged.
 
 ## Offline Support
 

@@ -32,6 +32,8 @@ import org.json.JSONObject
 
 internal class SnapshotCapture(
     private val config: UnilitixConfig,
+    /** False while consent is denied: nothing is captured. */
+    private val isEnabled: () -> Boolean = { true },
     private val onSnapshot: (Snapshot) -> Unit
 ) : Application.ActivityLifecycleCallbacks {
 
@@ -61,6 +63,7 @@ internal class SnapshotCapture(
     }
 
     private fun capture(activity: Activity) {
+        if (!isEnabled()) return
         // Capture view reference and viewport dimensions on the main thread.
         val rootView = activity.window.decorView
 
