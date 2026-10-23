@@ -4,7 +4,6 @@ import io.unilitix.sdk.BuildConfig
 import io.unilitix.sdk.core.Snapshot
 import io.unilitix.sdk.storage.PendingScreenshot
 import io.unilitix.sdk.util.Logger
-import okhttp3.CertificatePinner
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -30,7 +29,6 @@ internal class ApiClient(
         .connectTimeout(10, TimeUnit.SECONDS)
         .readTimeout(30, TimeUnit.SECONDS)
         .writeTimeout(30, TimeUnit.SECONDS)
-        .applyCertPinning()
         .apply {
             // HTTP header logging exists only in debug builds of the library itself
             // (never in the published AAR), and is further gated on debugLogging via
@@ -48,22 +46,13 @@ internal class ApiClient(
         }
         .build()
 
-    // Certificate pinning is active in release builds only — debug allows proxy tools (Charles, mitmproxy).
-    // TODO: Replace placeholder SHA-256 pins with real ones from your production API host.
-    //   Get pins: openssl s_client -connect <host>:443 | openssl x509 -pubkey -noout |
-    //             openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
-    private fun buildCertificatePinner(): CertificatePinner = CertificatePinner.Builder()
-        .add(
-            BuildConfig.API_HOST,
-            "sha256/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=", // TODO: primary pin
-            "sha256/BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=", // TODO: backup pin
-        )
-        .build()
-
-    private fun OkHttpClient.Builder.applyCertPinning(): OkHttpClient.Builder {
-        if (!BuildConfig.DEBUG) certificatePinner(buildCertificatePinner())
-        return this
-    }
+    // No certificate pinning. The API's certificates are issued by Let's
+    // Encrypt and rotate every few months (including intermediates), and an
+    // SDK pin cannot be updated in apps already in users' hands, so a pin
+    // would eventually break every install. The placeholder pins shipped up
+    // to 1.5.1 were never applied (they named a host the SDK does not call).
+    // Apps that want pinning can add it for api.unilitix.com in their own
+    // network_security_config.xml.
 
     suspend fun ingest(payload: String): ApiResult {
         // Never log the payload itself: it carries user IDs and traits.

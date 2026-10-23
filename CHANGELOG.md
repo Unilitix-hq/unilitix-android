@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.5.2
+
+### Removed
+- **Certificate pinning.** Release builds set up an OkHttp pinner with
+  placeholder pins for `unilitix-api-production.up.railway.app`. It never
+  took effect (the SDK talks to `api.unilitix.com`), but anyone pointing
+  `apiUrl` at that host would have had every request fail. The API's
+  certificates rotate (Let's Encrypt, including intermediates), and a pin in
+  an SDK cannot be updated in apps already installed, so pinning is gone
+  rather than filled in. Apps that want pinning can add it for
+  `api.unilitix.com` in their own `network_security_config.xml`.
+
 ## 1.5.1 — 2026-10-18
 
 ### Fixed

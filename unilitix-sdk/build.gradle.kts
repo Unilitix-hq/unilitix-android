@@ -15,17 +15,13 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.5.1\"")
+        buildConfigField("String", "SDK_VERSION", "\"1.5.2\"")
     }
 
     buildTypes {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            buildConfigField("String", "API_HOST", "\"unilitix-api-production.up.railway.app\"")
-        }
-        debug {
-            buildConfigField("String", "API_HOST", "\"localhost\"")
         }
     }
 
@@ -74,7 +70,7 @@ publishing {
         create<MavenPublication>("release") {
             groupId = "com.unilitix"
             artifactId = "unilitix-android"
-            version = "1.5.1"
+            version = "1.5.2"
 
             afterEvaluate {
                 from(components["release"])
