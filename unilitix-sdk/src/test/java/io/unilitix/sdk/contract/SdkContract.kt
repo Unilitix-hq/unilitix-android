@@ -5,7 +5,7 @@ package io.unilitix.sdk.contract
 
 /** The Unilitix SDK contract (see sdk-contract.md in the api repo). */
 object SdkContract {
-    const val VERSION: String = "1.0.0"
+    const val VERSION: String = "1.2.0"
     val eventTypes: List<String> = listOf("SESSION_START", "TAP", "RAGE_TAP", "SCROLL", "NAVIGATE", "CUSTOM", "EXCEPTION", "CRASH")
     val eventTypeAliases: Map<String, String> = mapOf("NAV" to "NAVIGATE")
     val networkTypes: List<String> = listOf("WIFI", "4G", "3G", "2G")
@@ -60,7 +60,7 @@ object SdkContract {
         "screenshotHeartbeatMs" to 10000,
     )
 
-    val divergences: List<String> = listOf("consent", "maskAllText", "maskImages", "maxReportsPerFingerprint", "maxScreenshotsPerMinute", "maxScreenshotsPerSession", "maxSnapshotsPerSession", "retry", "screenshotHeartbeatMs")
+    val divergences: List<String> = listOf("maskAllText", "maskImages", "maxReportsPerFingerprint", "maxScreenshotsPerMinute", "maxScreenshotsPerSession", "maxSnapshotsPerSession", "retry", "screenshotHeartbeatMs")
 
     data class FingerprintVector(val name: String, val exceptionType: String, val stack: String?, val fingerprint: String)
 

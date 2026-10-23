@@ -1,5 +1,82 @@
 # Changelog
 
+## 1.6.0
+
+Brings session replay, upload retry and crash reporting in line with the
+shared SDK contract (v1.2.0). Closes every Android divergence the contract
+lists.
+
+### Changed — read before upgrading
+- **`maskAllText` is on by default.** Screenshots now paint over every
+  visible `TextView` (including `Button`, `EditText` and other subclasses),
+  not only inputs; snapshots keep each text's word shapes and length but
+  replace every character with `•` (`"redacted": true` on the node).
+  **Replays will look more masked after upgrading.** To show views that
+  carry no personal data (headings, button labels, navigation), unmask them:
+  ```kotlin
+  Unilitix.unmask(toolbarTitle)          // this view and everything inside it
+  ```
+  ```xml
+  <TextView ...>
+      <tag android:id="@id/unilitix_unmasked" android:value="true" />
+  </TextView>
+  ```
+  or turn the option off with `maskAllText = false` to get the 1.5 behaviour
+  (inputs only). `unmask` never exempts inputs: they follow `maskInputs` /
+  `maskInputsInScreenshots` as before, and `@UnilitixPrivate` and
+  `maskedViewIds` always win. Jetpack Compose text is not covered (the SDK
+  does not walk Compose semantics): put sensitive Compose content in a host
+  view listed in `maskedViewIds` or annotated `@UnilitixPrivate`.
+- **Session caps raised to the contract defaults:** `maxScreenshotsPerSession`
+  300 → **1500** and `maxSnapshotsPerSession` 200 → **1500**. The per-minute
+  budget below keeps a normal session far below them. `maxSnapshotsPerSession`
+  is now a real per-session cap (it used to only size the in-memory buffer);
+  snapshots waiting for upload are held in memory up to 300.
+- **The on-device screenshot queue is bounded by bytes as well as count**
+  (40 MB, and `maxScreenshotsPerSession` frames), oldest dropped first, so
+  frames waiting for Wi-Fi cannot grow without limit.
+- **Upload retry follows the contract** (ported from the Flutter SDK 2.1.1).
+  Each flush cycle makes every request once — the old up-to-5 blocking
+  retries inside one flush are gone.
+  - Network error, 408, 429, 5xx: the data stays queued and a backoff window
+    opens: `min(1 s × 2^n, 300 s)` plus 0–20% jitter after the n-th
+    consecutive failure; flushes are skipped until it closes and a delayed
+    flush runs when it does. A `Retry-After` header (seconds) replaces the
+    window, clamped to 1–60 s (it was unclamped, 5 s when absent). One
+    success resets it.
+  - 401/403: **uploads pause until the app restarts** (the key is wrong or
+    revoked) and one warning is logged (never the key). Nothing is deleted:
+    data is sent on a later launch once the key is fixed. 1.5 dropped these
+    batches like any other 4xx.
+  - Other 4xx: that batch is dropped, no backoff (as before).
+  - Snapshots that fail to upload with a retryable error are kept for the
+    next attempt instead of being lost.
+  - The WorkManager worker no longer returns `Result.retry()`; WorkManager's
+    own exponential backoff no longer stacks on top of the SDK's.
+- `maskedViewIds` now masks in screenshots even with
+  `maskInputsInScreenshots = false` (it was skipped then).
+
+### Added
+- `maskAllText` (default `true`) and `maskImages` (default `false`) in
+  `UnilitixConfig.Builder`, with Java setters. `maskImages` paints over every
+  `ImageView` with a drawable and every leaf view with a bitmap background in
+  screenshots, and marks image nodes `masked` in snapshots.
+- `Unilitix.unmask(view)` / `Unilitix.unmask(view, false)` and the
+  `@id/unilitix_unmasked` view tag.
+- **Change-driven screenshots with a per-minute budget and a heartbeat**
+  (`maxScreenshotsPerMinute`, default 20; `screenshotHeartbeatMs`, default
+  10000, 0 turns it off). A frame is taken when the window redrew (or a new
+  screen resumed) and `screenshotIntervalMs` has passed, at most
+  `maxScreenshotsPerMinute` in any rolling minute, plus one heartbeat frame
+  per `screenshotHeartbeatMs` on a static screen. The first frame of each
+  session is taken at once. Same rules as the iOS and Flutter SDKs; 1.5 took
+  a frame every interval whether or not anything changed.
+- **Per-session crash dedup** (`maxReportsPerFingerprint` = 3,
+  `maxErrorReportsPerSession` = 50): the same fingerprint is reported at most
+  3 times per session and at most 50 CRASH + EXCEPTION reports are sent per
+  session, for automatic crashes and `recordException` alike. Counts reset
+  when a new session starts.
+
 ## 1.5.2
 
 ### Removed

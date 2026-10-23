@@ -1,6 +1,7 @@
 package io.unilitix.sdk
 
 import android.app.Application
+import android.view.View
 import io.unilitix.sdk.BuildConfig
 import io.unilitix.sdk.capture.CrashHandler
 import io.unilitix.sdk.capture.PerformanceMonitor
@@ -18,6 +19,7 @@ import io.unilitix.sdk.core.ConsentController
 import io.unilitix.sdk.core.ConsentEffects
 import io.unilitix.sdk.core.ConsentStore
 import io.unilitix.sdk.core.SharedPreferencesStore
+import io.unilitix.sdk.core.ErrorReportLimiter
 import io.unilitix.sdk.core.EventBuffer
 import io.unilitix.sdk.core.Fingerprint
 import io.unilitix.sdk.core.Identity
@@ -27,9 +29,11 @@ import io.unilitix.sdk.core.SnapshotBuffer
 import io.unilitix.sdk.core.UnilitixEvent
 import io.unilitix.sdk.flush.FlushScheduler
 import io.unilitix.sdk.network.ApiClient
+import io.unilitix.sdk.network.UploadGate
 import io.unilitix.sdk.storage.EventDatabase
 import io.unilitix.sdk.storage.PendingEvent
 import io.unilitix.sdk.storage.PendingScreenshot
+import io.unilitix.sdk.storage.ScreenshotQueueCap
 import io.unilitix.sdk.util.Json
 import java.io.File
 import io.unilitix.sdk.util.Logger
@@ -244,6 +248,35 @@ object Unilitix {
         setConsent(UnilitixConsent.GRANTED)
     }
 
+    /**
+     * Shows [view] and everything inside it in session replay even when
+     * [UnilitixConfig.Builder.maskAllText] or [UnilitixConfig.Builder.maskImages]
+     * is on. Use it for content with no personal data that is needed to
+     * understand the screen: headings, button labels, navigation, static copy.
+     * Pass `false` to mask it again. Can be called before [init].
+     *
+     * It never overrides [UnilitixPrivate], `maskedViewIds` or input masking
+     * (`maskInputs`): an `EditText` inside an unmasked view is still masked.
+     *
+     * In layout XML, the same marker is a keyed tag:
+     * ```xml
+     * <TextView ...>
+     *     <tag android:id="@id/unilitix_unmasked" android:value="true" />
+     * </TextView>
+     * ```
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun unmask(view: View, unmasked: Boolean = true) {
+        view.setTag(R.id.unilitix_unmasked, if (unmasked) true else null)
+    }
+
+    /** True when [view] itself carries the [unmask] marker (ancestors are checked by the walkers). */
+    internal fun isUnmasked(view: View): Boolean {
+        val tag = view.getTag(R.id.unilitix_unmasked) ?: return false
+        return tag == true || tag.toString().equals("true", ignoreCase = true)
+    }
+
     @JvmStatic
     fun reset() {
         val internal = instance ?: return
@@ -284,7 +317,17 @@ internal class UnilitixInternal(
     /** Serializes writes to the on-device queue with the consent purge. */
     private val queueMutex = Mutex()
 
-    internal val snapshotBuffer = SnapshotBuffer(config.maxSnapshotsPerSession)
+    // In-memory until the next successful batch; bounded separately from the
+    // per-session cap so a long offline or consent-pending stretch cannot hold
+    // 1500 view trees in memory.
+    internal val snapshotBuffer = SnapshotBuffer(config.maxSnapshotsPerSession.coerceAtMost(SnapshotBuffer.MAX_HELD))
+
+    /** Backoff window and 401/403 latch shared by every uploader (contract "Upload and retry"). */
+    internal val uploadGate = UploadGate()
+
+    /** maxReportsPerFingerprint / maxErrorReportsPerSession; reset on every session start. */
+    internal val errorLimiter = ErrorReportLimiter()
+
     private var snapshotCapture: SnapshotCapture? = null
     private var screenshotCapture: ScreenshotCapture? = null
 
@@ -293,6 +336,8 @@ internal class UnilitixInternal(
         onSessionStart = { session ->
             Logger.d("✅ Session started | id=${session.id}")
             screenshotCapture?.resetOrdinal()
+            snapshotCapture?.resetSession()
+            errorLimiter.resetSession()
         },
         onSessionEnd = { session ->
             Logger.d("Session ended: ${session.id}")
@@ -363,7 +408,8 @@ internal class UnilitixInternal(
                 database = database,
                 getCurrentSessionJson = { buildSessionJson(sessionManager.currentSession) },
                 onCrash = { sessionManager.markCrashed() },
-                isEnabled = { consent.canCapture }
+                isEnabled = { consent.canCapture },
+                admitReport = { fingerprint -> errorLimiter.admit(fingerprint) != null }
             ).install()
         }
 
@@ -377,7 +423,11 @@ internal class UnilitixInternal(
         }
 
         if (config.captureScreenshots) {
-            screenshotCapture = ScreenshotCapture(config, isEnabled = { consent.canCapture }) { screenshot ->
+            screenshotCapture = ScreenshotCapture(
+                config,
+                isEnabled = { consent.canCapture },
+                sessionId = { sessionManager.currentSession?.id }
+            ) { screenshot ->
                 scope.launch {
                     val sessionId = sessionManager.currentSession?.id?.toString() ?: return@launch
                     queueMutex.withLock {
@@ -393,9 +443,15 @@ internal class UnilitixInternal(
                                 imageBytes = screenshot.imageBytes,
                             )
                         )
-                        val count = database.screenshotDao().count()
-                        if (count > config.maxScreenshotsPerSession) {
-                            database.screenshotDao().deleteOldest(count - config.maxScreenshotsPerSession)
+                        // Bound the on-device queue by count and bytes, oldest first:
+                        // frames can wait for Wi-Fi across many sessions.
+                        val evict = ScreenshotQueueCap.idsToEvict(
+                            database.screenshotDao().sizesNewestFirst(),
+                            maxCount = config.maxScreenshotsPerSession
+                        )
+                        if (evict.isNotEmpty()) {
+                            evict.chunked(500).forEach { database.screenshotDao().deleteByIds(it) }
+                            Logger.d("Unilitix: screenshot queue full, dropped ${evict.size} oldest")
                         }
                     }
                 }
@@ -458,6 +514,14 @@ internal class UnilitixInternal(
         fatal: Boolean,
         platform: String
     ) {
+        val fingerprint = Fingerprint.of(type, stackTrace)
+        if (errorLimiter.admit(fingerprint) == null) {
+            // Same error reported maxReportsPerFingerprint times this session
+            // (or the session's error budget is spent): counted, not sent.
+            Logger.d("Unilitix: repeat ${if (fatal) "CRASH" else "EXCEPTION"} $fingerprint suppressed (per-session cap)")
+            if (fatal) sessionManager.markCrashed()
+            return
+        }
         val title = "$type: $message".take(200)
         val props = mapOf<String, Any>(
             "exception_type" to type,
@@ -466,7 +530,7 @@ internal class UnilitixInternal(
             "breadcrumbs" to breadcrumbs.toWire(),
             "fatal" to fatal,
             "title" to title,
-            "fingerprint" to Fingerprint.of(type, stackTrace)
+            "fingerprint" to fingerprint
         )
         val event = UnilitixEvent(
             type = if (fatal) "CRASH" else "EXCEPTION",
@@ -541,7 +605,9 @@ internal class UnilitixInternal(
 
         // While consent is pending the batch stays queued; releaseHeld()
         // schedules the upload once consent is granted.
-        if (consent.canUpload) flushScheduler.scheduleFlush()
+        // While a backoff window is open a delayed flush is already queued; after
+        // a 401/403 nothing is sent until the next launch. The batch stays queued.
+        if (consent.canUpload && !uploadGate.isPaused) flushScheduler.scheduleFlush()
         Logger.d("Unilitix: persisted ${events.size} events for session ${activeSession.id}")
     }
 
@@ -577,7 +643,7 @@ internal class UnilitixInternal(
     override fun releaseHeld() {
         scope.launch {
             flushNow()
-            flushScheduler.scheduleFlush()
+            if (!uploadGate.isPaused) flushScheduler.scheduleFlush()
         }
     }
 

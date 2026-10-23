@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("com.unilitix:unilitix-android:1.5.2")
+implementation("com.unilitix:unilitix-android:1.6.0")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -67,6 +67,9 @@ Unilitix.trackScreen("CheckoutScreen")
 ## Privacy
 
 - All `EditText` fields with `inputType=password` are auto-masked — coordinates recorded as `[MASKED]`
+- Session replay masks all text by default (`maskAllText = true`): screenshots paint over every
+  `TextView`, `Button` and `EditText`; snapshots keep word shapes but replace characters with `•`.
+  Images are shown unless `maskImages = true`. See [Replay privacy](#replay-privacy)
 - Consent (below) controls what is captured and uploaded
 
 ### Consent
@@ -105,8 +108,42 @@ The decision passed to `setConsent` is persisted: on later launches it wins over
 value passed to `init` (which only applies until the user has decided on this device).
 `Unilitix.optOut()` and `Unilitix.optIn()` are shorthands for `setConsent(DENIED)` and
 `setConsent(GRANTED)`; users who opted out with an earlier SDK version stay `DENIED`.
-Snapshots held while pending are kept in memory only (bounded by
-`maxSnapshotsPerSession`) and are lost if the process dies before consent is granted.
+Snapshots held while pending are kept in memory only (at most 300) and are lost if
+the process dies before consent is granted.
+
+### Replay privacy
+
+| Option | Default | Effect |
+|---|---|---|
+| `maskAllText` | `true` | Every `TextView` (incl. `Button`, `EditText`) is painted over in screenshots; snapshot text becomes `•••` |
+| `maskImages` | `false` | Every `ImageView` and bitmap background is painted over; snapshot image nodes carry no content |
+| `maskInputs` / `maskInputsInScreenshots` | `true` | Inputs masked (passwords always) |
+| `maskedViewIds`, `@UnilitixPrivate` | — | Always masked, whatever else is set |
+
+Show views that carry no personal data (headings, button labels, navigation) with
+`Unilitix.unmask(view)` — it applies to the view and everything inside it — or in XML:
+
+```xml
+<TextView android:id="@+id/title" ...>
+    <tag android:id="@id/unilitix_unmasked" android:value="true" />
+</TextView>
+```
+
+`unmask` never exempts inputs, `maskedViewIds` or `@UnilitixPrivate` views. Jetpack Compose
+text is not masked by `maskAllText` (the SDK does not walk Compose semantics): put sensitive
+Compose content in a host view listed in `maskedViewIds` or annotated `@UnilitixPrivate`.
+
+Screenshots are change-driven: a frame is taken when the screen redraws and
+`screenshotIntervalMs` has passed, at most `maxScreenshotsPerMinute` (20) in any rolling
+minute, plus one heartbeat frame every `screenshotHeartbeatMs` (10 s; `0` turns it off) on a
+static screen.
+
+### Uploads
+
+Each flush sends every request once. Network errors, 408, 429 and 5xx keep the data on the
+device and back off (1 s doubling to 5 min, plus jitter; `Retry-After` honoured, 1–60 s).
+A 401/403 means the API key is wrong: uploads pause until the app restarts, data is kept
+and one warning is logged.
 
 ## Configuration
 
@@ -125,6 +162,12 @@ Unilitix.init(this, "ul_live_xxx") {
     consent = UnilitixConsent.GRANTED          // initial consent if the user has not decided yet
     maskInputs = true                          // mask password fields
     maskedViewIds = setOf(R.id.et_secret)      // additional views to mask
+    maskAllText = true                         // mask all text in replay (Unilitix.unmask(view) to show safe views)
+    maskImages = false                         // replace images with placeholders in replay
+    maxScreenshotsPerSession = 1500            // screenshot cap per session
+    maxSnapshotsPerSession = 1500              // view-tree snapshot cap per session
+    maxScreenshotsPerMinute = 20               // rolling one-minute screenshot budget
+    screenshotHeartbeatMs = 10_000             // a frame at least this often on a static screen (0 = off)
     sampleRate = 1.0                           // 0.5 = track only 50% of users
 }
 ```
@@ -143,6 +186,7 @@ Unilitix.init(application, apiKey, consent) // initialize with an initial consen
 Unilitix.setConsent(consent)          // GRANTED / PENDING / DENIED, persisted
 Unilitix.consent                      // current consent state
 Unilitix.optOut()                     // = setConsent(DENIED): stop tracking, delete queued data
+Unilitix.unmask(view)                 // show a view (and its subtree) in replay despite maskAllText/maskImages
 Unilitix.optIn()                      // = setConsent(GRANTED)
 Unilitix.reset()                      // clear identity, start fresh anonymous session
 Unilitix.recordException(type, message, stackTrace, fatal)  // report a caught error (EXCEPTION) or, with fatal=true, a CRASH persisted before you re-throw

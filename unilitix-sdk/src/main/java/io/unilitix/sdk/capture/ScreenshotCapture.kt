@@ -7,15 +7,21 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.drawable.BitmapDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.widget.EditText
+import android.widget.ImageView
+import android.widget.TextView
+import io.unilitix.sdk.Unilitix
 import io.unilitix.sdk.UnilitixConfig
 import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.core.Screenshot
@@ -27,6 +33,8 @@ internal class ScreenshotCapture(
     private val config: UnilitixConfig,
     /** False while consent is denied: nothing is captured. */
     private val isEnabled: () -> Boolean = { true },
+    /** Current session id; a new id resets the scheduler (first frame, budget). */
+    private val sessionId: () -> String? = { null },
     private val onScreenshot: (Screenshot) -> Unit,
 ) : Application.ActivityLifecycleCallbacks {
 
@@ -38,10 +46,34 @@ internal class ScreenshotCapture(
     @Volatile private var ordinal = 0
     private var currentActivity: Activity? = null
 
+    private val maskPolicy = MaskPolicy(
+        maskInputs              = config.maskInputs,
+        maskInputsInScreenshots = config.maskInputsInScreenshots,
+        maskAllText             = config.maskAllText,
+        maskImages              = config.maskImages,
+    )
+
+    /** Change + interval, per-minute budget and heartbeat. Main thread only. */
+    private val scheduler = ReplayScheduler(
+        intervalMs   = config.screenshotIntervalMs,
+        heartbeatMs  = config.screenshotHeartbeatMs,
+        maxPerMinute = config.maxScreenshotsPerMinute,
+        clock        = { SystemClock.uptimeMillis() },
+    )
+
+    // How often the scheduler is asked. Capture itself happens only when it
+    // says so; the check is cheap.
+    private val tickMs = config.screenshotIntervalMs.coerceIn(MIN_TICK_MS, MAX_TICK_MS)
+
+    // Any frame the window draws marks the screen dirty. Our own software
+    // draw into a bitmap does not go through ViewRootImpl, so it does not.
+    private val drawListener = ViewTreeObserver.OnDrawListener { scheduler.markDirty() }
+    private var observedView: View? = null
+
     private val captureRunnable = object : Runnable {
         override fun run() {
             currentActivity?.let { capture(it) }
-            handler.postDelayed(this, config.screenshotIntervalMs)
+            handler.postDelayed(this, tickMs)
         }
     }
 
@@ -51,12 +83,40 @@ internal class ScreenshotCapture(
 
     override fun onActivityResumed(activity: Activity) {
         currentActivity = activity
-        handler.postDelayed(captureRunnable, config.screenshotIntervalMs)
+        scheduler.markDirty() // a new screen
+        observeDraws(activity.window.decorView)
+        handler.removeCallbacks(captureRunnable)
+        handler.postDelayed(captureRunnable, tickMs)
     }
 
     override fun onActivityPaused(activity: Activity) {
         handler.removeCallbacks(captureRunnable)
+        stopObservingDraws()
         currentActivity = null
+    }
+
+    private fun observeDraws(view: View) {
+        stopObservingDraws()
+        try {
+            val vto = view.viewTreeObserver
+            if (vto.isAlive) {
+                vto.addOnDrawListener(drawListener)
+                observedView = view
+            }
+        } catch (e: Exception) {
+            Logger.d("ScreenshotCapture: cannot observe draws: ${e.message}")
+        }
+    }
+
+    private fun stopObservingDraws() {
+        val view = observedView ?: return
+        observedView = null
+        try {
+            val vto = view.viewTreeObserver
+            if (vto.isAlive) vto.removeOnDrawListener(drawListener)
+        } catch (_: Exception) {
+            // Removing during a draw pass throws; the observer dies with the window anyway.
+        }
     }
 
     private fun capture(activity: Activity) {
@@ -65,6 +125,9 @@ internal class ScreenshotCapture(
 
         val rootView = activity.window.decorView.rootView
         if (rootView.width == 0 || rootView.height == 0) return
+
+        // Asked last: a yes spends one unit of the per-minute budget.
+        if (!scheduler.shouldCapture(sessionId() ?: "")) return
 
         val bitmap = try {
             val bmp = Bitmap.createBitmap(rootView.width, rootView.height, Bitmap.Config.ARGB_8888)
@@ -95,10 +158,17 @@ internal class ScreenshotCapture(
             viewportH = dm.heightPixels
         }
 
-        // Collect rects on main thread — View access is only safe here
-        val maskRects = if (config.maskInputsInScreenshots) {
+        // Collect rects on main thread — View access is only safe here.
+        // Private views and maskedViewIds are always masked; text, inputs and
+        // images follow maskAllText / maskInputs(InScreenshots) / maskImages.
+        val maskRects = try {
             collectMaskRects(rootView)
-        } else emptyList()
+        } catch (e: Exception) {
+            // Never upload a frame whose masking failed.
+            Logger.w("ScreenshotCapture: masking failed, frame dropped: ${e.message}")
+            bitmap.recycle()
+            return
+        }
 
         captureExecutor.execute {
             try {
@@ -131,51 +201,48 @@ internal class ScreenshotCapture(
     private fun collectMaskRects(rootView: View): List<Rect> {
         val rootLoc = IntArray(2)
         rootView.getLocationInWindow(rootLoc)
-
-        val rects = mutableListOf<Rect>()
-        walkViews(rootView) { view ->
-            // @UnilitixPrivate: mask entire subtree as one rect and stop child traversal
-            if (view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java) && view.width > 0 && view.height > 0) {
-                val loc = IntArray(2)
-                view.getLocationInWindow(loc)
-                rects.add(Rect(
-                    loc[0] - rootLoc[0],
-                    loc[1] - rootLoc[1],
-                    loc[0] - rootLoc[0] + view.width,
-                    loc[1] - rootLoc[1] + view.height,
-                ))
-                return@walkViews false  // parent rect covers all children
-            }
-
-            val shouldMask = when {
-                view is EditText -> {
-                    val it = view.inputType
-                    val isPassword =
-                        (it and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT &&
-                        ((it and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
-                         (it and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD) ||
-                        (it and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER &&
-                        (it and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_NUMBER_VARIATION_PASSWORD
-                    isPassword || config.maskInputs || config.maskedViewIds.contains(view.id)
-                }
-                config.maskedViewIds.contains(view.id) -> true
-                else -> false
-            }
-            if (shouldMask && view.width > 0 && view.height > 0) {
-                val loc = IntArray(2)
-                view.getLocationInWindow(loc)
-                rects.add(
-                    Rect(
-                        loc[0] - rootLoc[0],
-                        loc[1] - rootLoc[1],
-                        loc[0] - rootLoc[0] + view.width,
-                        loc[1] - rootLoc[1] + view.height,
-                    )
-                )
-            }
-            true  // continue traversing children
+        return ReplayMasking.screenshotRects(ViewNode(rootView, rootLoc), maskPolicy).map {
+            Rect(it.left, it.top, it.right, it.bottom)
         }
-        return rects
+    }
+
+    /** Adapts a View to the masking rules in [ReplayMasking]. Main thread only. */
+    private inner class ViewNode(private val view: View, private val rootLoc: IntArray) : MaskableNode {
+        override val kind: NodeKind
+            get() = when {
+                view is EditText -> NodeKind.INPUT
+                view is TextView -> NodeKind.TEXT
+                view is ImageView -> if (view.drawable != null) NodeKind.IMAGE else NodeKind.OTHER
+                view !is ViewGroup && view.background is BitmapDrawable -> NodeKind.IMAGE
+                else -> NodeKind.OTHER
+            }
+        override val isVisible: Boolean get() = view.visibility == View.VISIBLE
+        override val isPrivate: Boolean get() = view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java)
+        override val isMaskedById: Boolean get() = view.id != View.NO_ID && config.maskedViewIds.contains(view.id)
+        override val isUnmasked: Boolean get() = Unilitix.isUnmasked(view)
+        override val isPassword: Boolean
+            get() {
+                val it = (view as? EditText)?.inputType ?: return false
+                return (it and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT &&
+                    ((it and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                     (it and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD) ||
+                    (it and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER &&
+                    (it and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_NUMBER_VARIATION_PASSWORD
+            }
+        // Visible part only: a label scrolled half out of a list is masked
+        // where it shows, not over the header above the list.
+        override val rect: MaskRect?
+            get() {
+                if (view.width <= 0 || view.height <= 0) return null
+                val r = Rect()
+                if (!view.getGlobalVisibleRect(r)) return null
+                return MaskRect(r.left - rootLoc[0], r.top - rootLoc[1], r.right - rootLoc[0], r.bottom - rootLoc[1])
+            }
+        override val children: List<MaskableNode>
+            get() {
+                val group = view as? ViewGroup ?: return emptyList()
+                return List(group.childCount) { ViewNode(group.getChildAt(it), rootLoc) }
+            }
     }
 
     private fun applyMaskRects(bitmap: Bitmap, rects: List<Rect>): Bitmap {
@@ -184,14 +251,6 @@ internal class ScreenshotCapture(
         val paint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
         for (rect in rects) canvas.drawRect(rect, paint)
         return masked
-    }
-
-    // Returns false from callback to stop child traversal for that subtree
-    private fun walkViews(view: View, callback: (View) -> Boolean) {
-        if (!callback(view)) return
-        if (view is ViewGroup) {
-            for (i in 0 until view.childCount) walkViews(view.getChildAt(i), callback)
-        }
     }
 
     private fun resizeToMaxWidth(bitmap: Bitmap, maxWidth: Int): Bitmap {
@@ -217,4 +276,9 @@ internal class ScreenshotCapture(
     override fun onActivityStopped(activity: Activity) {}
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
     override fun onActivityDestroyed(activity: Activity) {}
+
+    companion object {
+        private const val MIN_TICK_MS = 250L
+        private const val MAX_TICK_MS = 1_000L
+    }
 }

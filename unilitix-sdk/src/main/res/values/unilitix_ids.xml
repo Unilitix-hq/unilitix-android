@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- View tag key for Unilitix.unmask(view): exempts a view and its subtree
+         from maskAllText / maskImages in session replay. -->
+    <item name="unilitix_unmasked" type="id" />
+</resources>

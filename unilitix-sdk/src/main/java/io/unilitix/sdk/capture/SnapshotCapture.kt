@@ -19,6 +19,7 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.TextView
+import io.unilitix.sdk.Unilitix
 import io.unilitix.sdk.UnilitixConfig
 import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.core.Snapshot
@@ -39,7 +40,14 @@ internal class SnapshotCapture(
 
     private val handler = Handler(Looper.getMainLooper())
     private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var ordinal = 0
+    @Volatile private var ordinal = 0
+
+    private val maskPolicy = MaskPolicy(
+        maskInputs              = config.maskInputs,
+        maskInputsInScreenshots = config.maskInputsInScreenshots,
+        maskAllText             = config.maskAllText,
+        maskImages              = config.maskImages,
+    )
     private var currentActivity: Activity? = null
 
     // Snapshot interval clamped to [1s, 60s] — never fast enough to cause jank.
@@ -50,6 +58,11 @@ internal class SnapshotCapture(
             currentActivity?.let { capture(it) }
             handler.postDelayed(this, intervalMs)
         }
+    }
+
+    /** New session: ordinals restart and the per-session cap is counted afresh. */
+    fun resetSession() {
+        ordinal = 0
     }
 
     override fun onActivityResumed(activity: Activity) {
@@ -64,6 +77,8 @@ internal class SnapshotCapture(
 
     private fun capture(activity: Activity) {
         if (!isEnabled()) return
+        // maxSnapshotsPerSession: stop for the rest of this session.
+        if (ordinal >= config.maxSnapshotsPerSession) return
         // Capture view reference and viewport dimensions on the main thread.
         val rootView = activity.window.decorView
 
@@ -91,7 +106,7 @@ internal class SnapshotCapture(
         // View properties are read-only at this point and safe to access off-thread.
         captureScope.launch {
             try {
-                val hierarchy = serializeView(rootView, 0) ?: return@launch
+                val hierarchy = serializeView(rootView, 0, unmasked = false) ?: return@launch
                 onSnapshot(
                     Snapshot(
                         capturedAt    = System.currentTimeMillis(),
@@ -108,7 +123,12 @@ internal class SnapshotCapture(
         }
     }
 
-    private fun serializeView(view: View, depth: Int): JSONObject? {
+    /**
+     * [unmasked] is true inside a subtree passed to `Unilitix.unmask`: its
+     * text and images are kept even with `maskAllText` / `maskImages` on.
+     * Inputs follow `maskInputs` regardless.
+     */
+    private fun serializeView(view: View, depth: Int, unmasked: Boolean): JSONObject? {
         if (view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java)) return null
         // GONE views have no layout — skip entirely so they don't pollute the tree.
         // INVISIBLE views still occupy space and may wrap visible children — capture them.
@@ -117,6 +137,7 @@ internal class SnapshotCapture(
 
         val obj = JSONObject()
         obj.put("type", view.javaClass.simpleName)
+        val exempt = unmasked || Unilitix.isUnmasked(view)
 
         val location = IntArray(2)
         view.getLocationOnScreen(location)
@@ -141,25 +162,31 @@ internal class SnapshotCapture(
                          (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD) ||
                         (inputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER &&
                         (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_NUMBER_VARIATION_PASSWORD
-                    val text = when {
-                        isMaskedById || config.maskInputs || isPassword -> "[MASKED]"
-                        else -> view.text.toString().take(200)
+                    if (isMaskedById) {
+                        obj.put("text", ReplayMasking.MASKED)
+                    } else {
+                        putText(obj, view.text.toString(), isInput = true, isPassword = isPassword, unmasked = exempt)
                     }
-                    obj.put("text", text)
                     obj.put("isPassword", isPassword)
                     obj.put("inputType", "edit")
                     obj.put("interactive", true)
                 }
                 view is Button -> {
-                    obj.put("text", if (isMaskedById) "[MASKED]" else view.text.toString().take(200))
+                    if (isMaskedById) obj.put("text", ReplayMasking.MASKED)
+                    else putText(obj, view.text.toString(), isInput = false, isPassword = false, unmasked = exempt)
                     obj.put("textColor", "#%06X".format(0xFFFFFF and view.currentTextColor))
                     obj.put("interactive", true)
                 }
                 view is TextView -> {
-                    obj.put("text", if (isMaskedById) "[MASKED]" else view.text.toString().take(200))
+                    if (isMaskedById) obj.put("text", ReplayMasking.MASKED)
+                    else putText(obj, view.text.toString(), isInput = false, isPassword = false, unmasked = exempt)
                     obj.put("textColor", "#%06X".format(0xFFFFFF and view.currentTextColor))
                 }
-                view is ImageView -> obj.put("isImage", true)
+                view is ImageView -> {
+                    obj.put("isImage", true)
+                    // maskImages: the node keeps its bounds but carries no image content.
+                    if (ReplayMasking.maskSnapshotImage(exempt, maskPolicy)) obj.put("masked", true)
+                }
             }
 
             extractBackgroundColor(view)?.let { obj.put("bgColor", it) }
@@ -178,12 +205,19 @@ internal class SnapshotCapture(
         if (view is ViewGroup && view.childCount > 0) {
             val children = JSONArray()
             for (i in 0 until view.childCount) {
-                serializeView(view.getChildAt(i), depth + 1)?.let { children.put(it) }
+                serializeView(view.getChildAt(i), depth + 1, exempt)?.let { children.put(it) }
             }
             if (children.length() > 0) obj.put("children", children)
         }
 
         return obj
+    }
+
+    /** Text for a node: redacted under `maskAllText`, `[MASKED]` for masked inputs (see [ReplayMasking.snapshotText]). */
+    private fun putText(obj: JSONObject, raw: String, isInput: Boolean, isPassword: Boolean, unmasked: Boolean) {
+        val masked = ReplayMasking.snapshotText(raw.take(200), isInput, isPassword, unmasked, maskPolicy)
+        obj.put("text", masked.text)
+        if (masked.redacted) obj.put("redacted", true)
     }
 
     private fun extractBackgroundColor(view: View): String? {
