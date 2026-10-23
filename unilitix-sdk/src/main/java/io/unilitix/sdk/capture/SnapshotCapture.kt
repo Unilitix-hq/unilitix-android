@@ -7,14 +7,14 @@ import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.LayerDrawable
 import android.graphics.drawable.RippleDrawable
-import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.text.InputType
-import android.util.DisplayMetrics
 import android.view.View
 import android.view.ViewGroup
+import android.webkit.WebView
 import android.widget.Button
 import android.widget.EditText
 import android.widget.ImageView
@@ -30,17 +30,40 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
+import java.lang.reflect.Field
+import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * View-tree snapshots of the resumed activity's window.
+ *
+ * A main-looper tick runs four times a second while an activity is resumed.
+ * [SnapshotScheduler] decides when the tree is walked: once per
+ * `snapshotIntervalMs` (clamped to 1–60 s), and as soon as the interval
+ * allows after a navigation (an activity resuming). A tree identical to the
+ * last one taken in the session (same screen and viewport) is dropped, and
+ * only kept snapshots take an ordinal. Same behaviour as UnilitixCore (iOS).
+ *
+ * The walk ([SnapshotBuilder] over [ViewSnapshotNode]) runs on the main
+ * thread, as the View system requires, masks text as it goes and produces
+ * an immutable [SnapshotNode] tree capped at [SnapshotBuilder.MAX_NODES]
+ * nodes and [SnapshotBuilder.MAX_DEPTH] levels. Only the JSON encoding and
+ * the hand-off happen on the IO scope.
+ *
+ * Coordinates: `bounds` and `viewportWidth`/`viewportHeight` are in dp,
+ * relative to the window's top-left corner.
+ */
 internal class SnapshotCapture(
     private val config: UnilitixConfig,
     /** False while consent is denied: nothing is captured. */
     private val isEnabled: () -> Boolean = { true },
+    /** The current session's id; a change restarts the schedule and dedupe. */
+    private val sessionId: () -> String? = { null },
     private val onSnapshot: (Snapshot) -> Unit
 ) : Application.ActivityLifecycleCallbacks {
 
     private val handler = Handler(Looper.getMainLooper())
     private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    @Volatile private var ordinal = 0
+    private val ordinal = AtomicInteger(0)
 
     private val maskPolicy = MaskPolicy(
         maskInputs              = config.maskInputs,
@@ -50,175 +73,145 @@ internal class SnapshotCapture(
     )
     private var currentActivity: Activity? = null
 
-    // Snapshot interval clamped to [1s, 60s] — never fast enough to cause jank.
-    private val intervalMs = config.snapshotIntervalMs.coerceIn(MIN_INTERVAL_MS, MAX_INTERVAL_MS)
+    // Main thread only. Interval clamped to [1s, 60s] — never fast enough to cause jank.
+    private val scheduler = SnapshotScheduler(config.snapshotIntervalMs)
 
-    private val captureRunnable = object : Runnable {
+    private val tickRunnable = object : Runnable {
         override fun run() {
-            currentActivity?.let { capture(it) }
-            handler.postDelayed(this, intervalMs)
+            currentActivity?.let { tick(it) }
+            handler.postDelayed(this, TICK_MS)
         }
     }
 
     /** New session: ordinals restart and the per-session cap is counted afresh. */
     fun resetSession() {
-        ordinal = 0
+        ordinal.set(0)
     }
 
     override fun onActivityResumed(activity: Activity) {
         currentActivity = activity
-        handler.postDelayed(captureRunnable, intervalMs)
+        scheduler.markNavigation() // a new screen, or back from the background
+        handler.removeCallbacks(tickRunnable)
+        // One tick later, so the first layout pass of a new activity has run.
+        handler.postDelayed(tickRunnable, TICK_MS)
     }
 
     override fun onActivityPaused(activity: Activity) {
-        handler.removeCallbacks(captureRunnable)
+        handler.removeCallbacks(tickRunnable)
         currentActivity = null
     }
 
-    private fun capture(activity: Activity) {
+    /** Main thread. */
+    private fun tick(activity: Activity) {
         if (!isEnabled()) return
         // maxSnapshotsPerSession: stop for the rest of this session.
-        if (ordinal >= config.maxSnapshotsPerSession) return
-        // Capture view reference and viewport dimensions on the main thread.
+        if (ordinal.get() >= config.maxSnapshotsPerSession) return
         val rootView = activity.window.decorView
+        // Not laid out yet: keep a pending navigation for the next tick.
+        if (rootView.width <= 0 || rootView.height <= 0) return
 
-        // Use full physical display size so viewport coordinates match getLocationOnScreen.
-        // decorView.height excludes the nav bar on non-edge-to-edge builds.
-        val viewportWidth: Int
-        val viewportHeight: Int
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = activity.windowManager.currentWindowMetrics.bounds
-            viewportWidth = bounds.width()
-            viewportHeight = bounds.height()
-        } else {
-            @Suppress("DEPRECATION")
-            val dm = DisplayMetrics()
-            @Suppress("DEPRECATION")
-            activity.windowManager.defaultDisplay.getRealMetrics(dm)
-            viewportWidth = dm.widthPixels
-            viewportHeight = dm.heightPixels
-        }
+        val now = SystemClock.uptimeMillis()
+        if (!scheduler.shouldWalk(now, sessionId() ?: "")) return
 
-        val captureOrdinal = ordinal++
-        val screenName = activity.javaClass.simpleName
+        try {
+            val window = WindowGeometry.windowPixels(activity)
+            if (window.right - window.left <= 0 || window.bottom - window.top <= 0) return
+            val density = WindowGeometry.density(activity)
+            val origin = intArrayOf(window.left, window.top)
 
-        // Serialize the view tree on the IO thread to avoid blocking the main thread.
-        // View properties are read-only at this point and safe to access off-thread.
-        captureScope.launch {
-            try {
-                val hierarchy = serializeView(rootView, 0, unmasked = false) ?: return@launch
-                onSnapshot(
-                    Snapshot(
-                        capturedAt    = System.currentTimeMillis(),
-                        ordinal       = captureOrdinal,
-                        screenName    = screenName,
-                        viewportWidth = viewportWidth,
-                        viewportHeight = viewportHeight,
-                        hierarchy     = hierarchy
+            val tree = SnapshotBuilder.build(ViewSnapshotNode(rootView, origin), density, maskPolicy) ?: return
+            val viewportWidth = Dp.of(window.right - window.left, density)
+            val viewportHeight = Dp.of(window.bottom - window.top, density)
+            val screenName = activity.javaClass.simpleName
+
+            if (!scheduler.accept(tree, screenName, viewportWidth, viewportHeight, now)) return
+            val captureOrdinal = ordinal.getAndIncrement()
+            if (captureOrdinal >= config.maxSnapshotsPerSession) return
+            val capturedAt = System.currentTimeMillis()
+
+            // Off the main thread: only encoding and the hand-off; the tree is immutable.
+            captureScope.launch {
+                try {
+                    onSnapshot(
+                        Snapshot(
+                            capturedAt     = capturedAt,
+                            ordinal        = captureOrdinal,
+                            screenName     = screenName,
+                            viewportWidth  = viewportWidth,
+                            viewportHeight = viewportHeight,
+                            hierarchy      = tree.toJson()
+                        )
                     )
-                )
-            } catch (e: Exception) {
-                Logger.w("SnapshotCapture: ${e.message}")
+                } catch (e: Exception) {
+                    Logger.w("SnapshotCapture: ${e.message}")
+                }
             }
+        } catch (e: Exception) {
+            Logger.w("SnapshotCapture: ${e.message}")
         }
     }
 
     /**
-     * [unmasked] is true inside a subtree passed to `Unilitix.unmask`: its
-     * text and images are kept even with `maskAllText` / `maskImages` on.
-     * Inputs follow `maskInputs` regardless.
+     * Adapts a View to [SnapshotBuilder]. Main thread only, during the walk;
+     * properties are read on demand so text is read only for text and input
+     * views, and nothing is read for skipped or private views.
      */
-    private fun serializeView(view: View, depth: Int, unmasked: Boolean): JSONObject? {
-        if (view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java)) return null
-        // GONE views have no layout — skip entirely so they don't pollute the tree.
-        // INVISIBLE views still occupy space and may wrap visible children — capture them.
-        if (view.visibility == View.GONE) return null
-        if (view.width <= 0 || view.height <= 0) return null
-
-        val obj = JSONObject()
-        obj.put("type", view.javaClass.simpleName)
-        val exempt = unmasked || Unilitix.isUnmasked(view)
-
-        val location = IntArray(2)
-        view.getLocationOnScreen(location)
-        obj.put("bounds", JSONObject().apply {
-            put("x", location[0])
-            put("y", location[1])
-            put("w", view.width)
-            put("h", view.height)
-        })
-
-        if (view.visibility != View.VISIBLE) {
-            // INVISIBLE: preserve bounds for layout accuracy, mark hidden, still recurse below
-            obj.put("hidden", true)
-        } else {
-            val isMaskedById = view.id != View.NO_ID && view.id in config.maskedViewIds
-
-            when {
-                view is EditText -> {
-                    val inputType = view.inputType
-                    val isPassword = (inputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT &&
-                        ((inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
-                         (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD) ||
-                        (inputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER &&
-                        (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_NUMBER_VARIATION_PASSWORD
-                    if (isMaskedById) {
-                        obj.put("text", ReplayMasking.MASKED)
-                    } else {
-                        putText(obj, view.text.toString(), isInput = true, isPassword = isPassword, unmasked = exempt)
-                    }
-                    obj.put("isPassword", isPassword)
-                    obj.put("inputType", "edit")
-                    obj.put("interactive", true)
-                }
-                view is Button -> {
-                    if (isMaskedById) obj.put("text", ReplayMasking.MASKED)
-                    else putText(obj, view.text.toString(), isInput = false, isPassword = false, unmasked = exempt)
-                    obj.put("textColor", "#%06X".format(0xFFFFFF and view.currentTextColor))
-                    obj.put("interactive", true)
-                }
-                view is TextView -> {
-                    if (isMaskedById) obj.put("text", ReplayMasking.MASKED)
-                    else putText(obj, view.text.toString(), isInput = false, isPassword = false, unmasked = exempt)
-                    obj.put("textColor", "#%06X".format(0xFFFFFF and view.currentTextColor))
-                }
-                view is ImageView -> {
-                    obj.put("isImage", true)
-                    // maskImages: the node keeps its bounds but carries no image content.
-                    if (ReplayMasking.maskSnapshotImage(exempt, maskPolicy)) obj.put("masked", true)
-                }
+    private inner class ViewSnapshotNode(private val view: View, private val origin: IntArray) : SnapshotViewNode {
+        override val typeName: String get() = view.javaClass.simpleName
+        override val kind: NodeKind
+            get() = when (view) {
+                is EditText -> NodeKind.INPUT
+                is TextView -> NodeKind.TEXT
+                is ImageView -> NodeKind.IMAGE
+                else -> NodeKind.OTHER
             }
-
-            extractBackgroundColor(view)?.let { obj.put("bgColor", it) }
-
-            if (view.hasOnClickListeners() || view.isClickable) {
-                obj.put("interactive", true)
+        override val isWebView: Boolean get() = view is WebView
+        override val isGone: Boolean get() = view.visibility == View.GONE
+        override val isVisible: Boolean get() = view.visibility == View.VISIBLE
+        override val isPrivate: Boolean get() = view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java)
+        override val isMaskedById: Boolean get() = view.id != View.NO_ID && view.id in config.maskedViewIds
+        override val isUnmasked: Boolean get() = Unilitix.isUnmasked(view)
+        override val isPassword: Boolean
+            get() {
+                val inputType = (view as? EditText)?.inputType ?: return false
+                return (inputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_TEXT &&
+                    ((inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_PASSWORD ||
+                     (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_TEXT_VARIATION_WEB_PASSWORD) ||
+                    (inputType and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER &&
+                    (inputType and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_NUMBER_VARIATION_PASSWORD
             }
-
-            if (isMaskedById) {
-                obj.put("masked", true)
-                obj.remove("text")
+        override val frame: MaskRect
+            get() {
+                val loc = IntArray(2)
+                view.getLocationOnScreen(loc)
+                val x = loc[0] - origin[0]
+                val y = loc[1] - origin[1]
+                return MaskRect(x, y, x + view.width, y + view.height)
             }
-        }
-
-        // No depth cap — traverse the full tree regardless of nesting depth
-        if (view is ViewGroup && view.childCount > 0) {
-            val children = JSONArray()
-            for (i in 0 until view.childCount) {
-                serializeView(view.getChildAt(i), depth + 1, exempt)?.let { children.put(it) }
+        override val text: String? get() = (view as? TextView)?.text?.toString()
+        override val textColor: String?
+            get() = (view as? TextView)?.let { hex(it.currentTextColor) }
+        override val backgroundColor: String? get() = extractBackgroundColor(view)
+        override val isInteractive: Boolean
+            get() = view is Button || view.hasOnClickListeners() || view.isClickable
+        override val children: List<SnapshotViewNode>
+            get() {
+                val group = view as? ViewGroup ?: return emptyList()
+                return List(group.childCount) { ViewSnapshotNode(group.getChildAt(it), origin) }
             }
-            if (children.length() > 0) obj.put("children", children)
-        }
-
-        return obj
     }
 
-    /** Text for a node: redacted under `maskAllText`, `[MASKED]` for masked inputs (see [ReplayMasking.snapshotText]). */
-    private fun putText(obj: JSONObject, raw: String, isInput: Boolean, isPassword: Boolean, unmasked: Boolean) {
-        val masked = ReplayMasking.snapshotText(raw.take(200), isInput, isPassword, unmasked, maskPolicy)
-        obj.put("text", masked.text)
-        if (masked.redacted) obj.put("redacted", true)
+    // Reflection lookups are cached (main thread only): the walk must stay cheap.
+    private val fillColorFields = HashMap<Class<*>, Field?>()
+    private val gradientFillPaint: Field? by lazy(LazyThreadSafetyMode.NONE) {
+        try {
+            GradientDrawable::class.java.getDeclaredField("mFillPaint").also { it.isAccessible = true }
+        } catch (_: Exception) {
+            null
+        }
     }
+
+    private fun hex(color: Int): String = "#%06X".format(0xFFFFFF and color)
 
     private fun extractBackgroundColor(view: View): String? {
         // Strategy 1: plain ColorDrawable
@@ -255,8 +248,18 @@ internal class SnapshotCapture(
         //   MaterialShapeDrawable, which is the actual background for Material 3 buttons
         try {
             val bg = view.background ?: return null
-            val fillColorField = bg.javaClass.getDeclaredField("fillColor")
-            fillColorField.isAccessible = true
+            val cls = bg.javaClass
+            val fillColorField = if (fillColorFields.containsKey(cls)) {
+                fillColorFields[cls]
+            } else {
+                val f = try {
+                    cls.getDeclaredField("fillColor").also { it.isAccessible = true }
+                } catch (_: Exception) {
+                    null
+                }
+                fillColorFields[cls] = f // misses are cached too
+                f
+            } ?: return null
             val csl = fillColorField.get(bg) as? ColorStateList ?: return null
             val color = csl.getColorForState(
                 intArrayOf(android.R.attr.state_enabled),
@@ -285,8 +288,7 @@ internal class SnapshotCapture(
         d ?: return null
         return try {
             // mFillPaint is populated after the drawable is drawn at least once
-            val field = GradientDrawable::class.java.getDeclaredField("mFillPaint")
-            field.isAccessible = true
+            val field = gradientFillPaint ?: return null
             val paint = field.get(d) as? android.graphics.Paint
             val color = paint?.color ?: return null
             if (color != 0 && color != -1) "#%06X".format(0xFFFFFF and color) else null
@@ -302,7 +304,35 @@ internal class SnapshotCapture(
     override fun onActivityDestroyed(activity: Activity) {}
 
     companion object {
-        private const val MIN_INTERVAL_MS = 1_000L
-        private const val MAX_INTERVAL_MS = 60_000L
+        /** How often the scheduler is asked (as iOS); walking happens only when it says so. */
+        private const val TICK_MS = 250L
     }
+}
+
+/** The hierarchy JSON; null fields are left out. */
+internal fun SnapshotNode.toJson(): JSONObject {
+    val obj = JSONObject()
+    obj.put("type", type)
+    obj.put("bounds", JSONObject().apply {
+        put("x", bounds.x)
+        put("y", bounds.y)
+        put("w", bounds.w)
+        put("h", bounds.h)
+    })
+    text?.let { obj.put("text", it) }
+    redacted?.let { obj.put("redacted", it) }
+    textColor?.let { obj.put("textColor", it) }
+    bgColor?.let { obj.put("bgColor", it) }
+    isPassword?.let { obj.put("isPassword", it) }
+    inputType?.let { obj.put("inputType", it) }
+    interactive?.let { obj.put("interactive", it) }
+    isImage?.let { obj.put("isImage", it) }
+    masked?.let { obj.put("masked", it) }
+    hidden?.let { obj.put("hidden", it) }
+    children?.let { kids ->
+        val arr = JSONArray()
+        for (k in kids) arr.put(k.toJson())
+        obj.put("children", arr)
+    }
+    return obj
 }

@@ -56,6 +56,8 @@ internal data class MaskedText(val text: String, val redacted: Boolean)
  *   exempts an input from this.
  * - `maskAllText` (default on): every TextView, Button and input.
  * - `maskImages` (default off): every ImageView and bitmap background.
+ * - Snapshots only: a WebView is one masked node with `maskAllText` or
+ *   `maskInputs` (screenshots do not classify web views).
  * - `Unilitix.unmask(view)` exempts that view and its subtree from the two
  *   options above.
  */
@@ -108,6 +110,14 @@ internal object ReplayMasking {
 
     /** True when an image node's content must be dropped from a snapshot. */
     fun maskSnapshotImage(unmasked: Boolean, policy: MaskPolicy): Boolean = policy.maskImages && !unmasked
+
+    /**
+     * True when a web view's snapshot node is marked masked: with `maskAllText`
+     * or `maskInputs`, unless inside an unmasked subtree (as iOS). Its text and
+     * inputs cannot be found, so its subtree is never walked either way.
+     */
+    fun maskSnapshotWebView(unmasked: Boolean, policy: MaskPolicy): Boolean =
+        (policy.maskAllText || policy.maskInputs) && !unmasked
 
     /**
      * Replaces every non-whitespace character with `•`, keeping whitespace,

@@ -4,12 +4,15 @@ import kotlin.math.abs
 
 internal data class TapRecord(val x: Float, val y: Float, val screen: String, val timestampMs: Long)
 
+/**
+ * Rage taps per the SDK contract. Positions are logical px (dp), as
+ * [TouchTracker] reports them, so the radius is [RADIUS_DP] directly on
+ * every screen density.
+ */
 internal class RageTapDetector(
-    /** Display density, so the radius is the contract's 100 dp on every screen. */
-    density: Float = 1f,
     private val onRageTap: (screen: String, x: Float, y: Float) -> Unit
 ) {
-    private val radiusPx = RADIUS_DP * density
+    private val radius = RADIUS_DP
 
     private val recentTaps = mutableListOf<TapRecord>()
 
@@ -20,7 +23,7 @@ internal class RageTapDetector(
         recentTaps.add(TapRecord(x, y, screen, now))
 
         val clusterTaps = recentTaps.filter { tap ->
-            tap.screen == screen && abs(tap.x - x) <= radiusPx && abs(tap.y - y) <= radiusPx
+            tap.screen == screen && abs(tap.x - x) <= radius && abs(tap.y - y) <= radius
         }
 
         if (clusterTaps.size >= MIN_TAPS) {

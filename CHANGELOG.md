@@ -1,5 +1,65 @@
 # Changelog
 
+## 1.6.1
+
+View-tree snapshots now match UnilitixCore (iOS) 0.4.0 and common
+session-replay practice, and every position or size the SDK sends is in
+logical pixels, as the SDK contract specifies.
+
+### Changed — read before upgrading
+- **Taps, screen size and snapshot coordinates are in dp** (the contract's
+  "logical px"; iOS sends points, Flutter logical pixels). Pixels ÷
+  `displayMetrics.density`, rounded to whole dp, measured from the window's
+  top-left corner (on API 30+ the window's own bounds, so split screen is
+  correct). They used to be physical pixels.
+  - `TAP` and `RAGE_TAP` `x`/`y` (whole numbers now; the rage-tap position
+    is the cluster centre, rounded).
+  - Snapshot node `bounds` (`x`, `y`, `w`, `h`) and snapshot
+    `viewportWidth` / `viewportHeight`.
+  - Screenshot `viewportWidth` / `viewportHeight` (the space taps are
+    overlaid in). The image itself is unchanged.
+  - Device `screenWidth` / `screenHeight`. `screenDensity` is unchanged
+    (pixels per dp), so pixels can still be recovered.
+  The rage-tap radius is 100 dp applied directly (it was already 100 dp,
+  scaled to pixels). Replay frames are drawn scaled by their own viewport, so
+  1.6.0 and 1.6.1 replays both render, and taps now line up with snapshot
+  frames. **Heatmaps or reports that mix Android sessions from before 1.6.1
+  with newer ones will show the older taps at pixel scale** (2–4× too far
+  from the top-left corner on most phones); filter by SDK version if that
+  matters. Anything else that reads raw Android positions must expect dp from
+  1.6.1 on.
+- **Private views stay in the tree as placeholders.** `@UnilitixPrivate`
+  views and views in `maskedViewIds` are sent as a node with `type`,
+  `bounds` and `"masked": true` only: no text, no other fields, no children
+  (`@UnilitixPrivate` views used to be dropped, leaving a hole in the
+  layout; `maskedViewIds` views used to keep their children).
+- **`WebView`s are one leaf node**, `"masked": true` while `maskAllText` or
+  `maskInputs` is on (unless inside an `unmask`ed subtree), as on iOS.
+- **Unchanged screens are not re-sent.** The tree is walked once per
+  `snapshotIntervalMs`, but a walk identical to the last snapshot kept in
+  the session (same screen, viewport and tree) is dropped, so a static
+  screen costs one snapshot instead of one per second. Ordinals count kept
+  snapshots only, so they stay contiguous; `maxSnapshotsPerSession` counts
+  kept snapshots too.
+- **Navigation is captured promptly.** After an activity resumes (a new
+  screen or a return from the background) the tree is walked at the next
+  250 ms tick, as soon as `snapshotIntervalMs` has passed since the last
+  kept snapshot, instead of a full interval later.
+- **Size caps:** a snapshot holds at most 2000 nodes and 64 levels below the
+  root (the iOS limits). Past them, nodes are left out; nothing marks the
+  truncation.
+
+### Fixed
+- **The view tree is read on the main thread.** It used to be walked on a
+  background thread, racing layout and text changes (wrong bounds, torn
+  text, occasional exceptions). The walk now builds an immutable tree on
+  the main thread; only JSON encoding and the hand-off run on the IO
+  dispatcher. Reflection lookups for background colours are cached to keep
+  the walk cheap.
+
+Masking rules, consent, sampling and `maxSnapshotsPerSession` defaults are
+unchanged.
+
 ## 1.6.0
 
 Brings session replay, upload retry and crash reporting in line with the

@@ -14,7 +14,8 @@ import io.unilitix.sdk.util.Logger
 internal class TouchTracker(
     private val maskInputs: Boolean,
     private val maskedViewIds: Set<Int>,
-    private val onTap: (screen: String, x: Float, y: Float, viewId: String) -> Boolean
+    /** [x]/[y] in dp (logical px) relative to the window origin, like snapshot bounds. */
+    private val onTap: (screen: String, x: Int, y: Int, viewId: String) -> Boolean
 ) : Application.ActivityLifecycleCallbacks {
 
     private val wrappedCallbacks = mutableMapOf<Activity, Window.Callback>()
@@ -73,7 +74,11 @@ internal class TouchTracker(
             resName
         } ?: "unknown"
 
-        onTap(screenName, x, y, viewDesc)
+        // Hit-testing above uses raw screen pixels; the event carries logical px
+        // relative to the window, the space of snapshot bounds and viewports.
+        val window = WindowGeometry.windowPixels(activity)
+        val density = WindowGeometry.density(activity)
+        onTap(screenName, Dp.point(x, window.left, density), Dp.point(y, window.top, density), viewDesc)
     }
 
     private fun findViewAtPoint(activity: Activity, x: Float, y: Float): View? {
