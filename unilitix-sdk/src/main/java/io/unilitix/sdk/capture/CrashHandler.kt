@@ -26,7 +26,13 @@ internal class CrashHandler(
     private val getCurrentSessionJson: () -> String?,
     private val onCrash: () -> Unit,
     /** False while consent is denied: the crash is passed on, not recorded. */
-    private val isEnabled: () -> Boolean = { true }
+    private val isEnabled: () -> Boolean = { true },
+    /**
+     * Per-session dedup (contract `maxReportsPerFingerprint`,
+     * `maxErrorReportsPerSession`): false when this fingerprint was already
+     * reported often enough this session. The crash is still passed on.
+     */
+    private val admitReport: (fingerprint: String) -> Boolean = { true }
 ) : Thread.UncaughtExceptionHandler {
 
     private val originalHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -52,6 +58,11 @@ internal class CrashHandler(
             val lastScreen = breadcrumbs.lastScreen() ?: ""
             val exType = throwable.javaClass.name
             val title = "$exType: ${throwable.message ?: ""}".take(200)
+            val fingerprint = Fingerprint.of(exType, stackTrace)
+            if (!admitReport(fingerprint)) {
+                Logger.d("CrashHandler: repeat crash $fingerprint suppressed (per-session cap)")
+                return // finally still hands the crash to the original handler
+            }
 
             val crashEvent = mapOf(
                 "type"             to "CRASH",
@@ -65,7 +76,7 @@ internal class CrashHandler(
                 // server group one bug once across devices.
                 "fatal"            to true,
                 "title"            to title,
-                "metadata"         to mapOf("fingerprint" to Fingerprint.of(exType, stackTrace)),
+                "metadata"         to mapOf("fingerprint" to fingerprint),
                 "screen"           to lastScreen,
                 "x"                to 0.0,
                 "y"                to 0.0,

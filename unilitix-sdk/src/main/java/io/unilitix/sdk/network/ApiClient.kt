@@ -18,6 +18,15 @@ import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
 
+/** Screenshots confirmed (safe to delete) and the API failure that stopped the upload, if any. */
+internal data class ScreenshotUploadResult(
+    val confirmedIds: Set<Long>,
+    val failure: ApiResult? = null,
+)
+
+/** A non-2xx response from the Unilitix API, classified. */
+internal class HttpStatusException(val result: ApiResult, code: Int) : IOException("HTTP $code")
+
 internal class ApiClient(
     private val apiUrl: String,
     private val apiKey: String,
@@ -73,12 +82,9 @@ internal class ApiClient(
                         val sessionId = try { JSONObject(body).optString("sessionId", "") } catch (e: Exception) { "" }
                         ApiResult.Success(sessionId)
                     }
-                    it.code == 429 -> {
-                        val retryAfter = it.header("Retry-After")?.toLongOrNull()?.times(1000) ?: 5_000L
-                        ApiResult.RateLimit(retryAfter)
-                    }
-                    it.code in 400..499 -> ApiResult.ClientError(it.code, it.body?.string() ?: "")
-                    else -> ApiResult.ServerError(it.code)
+                    // 401/403 → AuthError, 408/429 → RateLimit, other 4xx → ClientError,
+                    // else ServerError; Retry-After is kept raw and clamped by RetryPolicy.
+                    else -> ApiResult.failure(it.code, it.header("Retry-After"), it.body?.string()?.take(200) ?: "")
                 }
             }
         } catch (e: IOException) {
@@ -86,26 +92,26 @@ internal class ApiClient(
         }
     }
 
-    suspend fun uploadSnapshots(sessionId: String, snapshots: List<Snapshot>) {
-        snapshots.chunked(20).forEach { chunk ->
-            val payload = buildSnapshotPayload(sessionId, chunk)
-            val request = Request.Builder()
-                .url("$apiUrl/v1/ingest/snapshots")
-                .post(payload.toRequestBody(json))
-                .header("x-unilitix-key", apiKey)
-                .header("User-Agent", "Unilitix-Android/${BuildConfig.SDK_VERSION}")
-                .build()
-            try {
-                client.newCall(request).execute().use { response ->
-                    if (response.isSuccessful) {
-                        Logger.d("ApiClient: uploaded ${chunk.size} snapshots for session $sessionId")
-                    } else {
-                        Logger.w("ApiClient: snapshot upload ${response.code} for session $sessionId")
-                    }
+    /** Uploads one chunk of snapshots in one request (the caller chunks and decides on retry). */
+    suspend fun uploadSnapshots(sessionId: String, chunk: List<Snapshot>): ApiResult {
+        val payload = buildSnapshotPayload(sessionId, chunk)
+        val request = Request.Builder()
+            .url("$apiUrl/v1/ingest/snapshots")
+            .post(payload.toRequestBody(json))
+            .header("x-unilitix-key", apiKey)
+            .header("User-Agent", "Unilitix-Android/${BuildConfig.SDK_VERSION}")
+            .build()
+        return try {
+            client.newCall(request).execute().use { response ->
+                if (response.isSuccessful) {
+                    Logger.d("ApiClient: uploaded ${chunk.size} snapshots for session $sessionId")
+                    ApiResult.Success(sessionId)
+                } else {
+                    ApiResult.failure(response.code, response.header("Retry-After"))
                 }
-            } catch (e: IOException) {
-                Logger.w("ApiClient: snapshot upload failed: ${e.message}")
             }
+        } catch (e: IOException) {
+            ApiResult.NetworkError(e)
         }
     }
 
@@ -129,18 +135,31 @@ internal class ApiClient(
 
     // Upload screenshots to R2 via presigned URLs (2-step: init → PUT → confirm).
     // Returns the Room DB IDs of shots that were successfully confirmed so callers
-    // can delete only those, not the entire pending batch.
-    suspend fun uploadScreenshots(screenshots: List<PendingScreenshot>): Set<Long> {
+    // can delete only those, not the entire pending batch. A retryable or auth
+    // failure of an API call (init/confirm) stops the upload and is returned in
+    // `failure` for the caller's backoff. Other 4xx (e.g. a session the server
+    // does not know yet, before its id is remapped) leave the shots queued for
+    // the next flush, as before; the queue cap bounds them. Presigned PUT
+    // failures are storage errors, not API answers, and are not reported.
+    suspend fun uploadScreenshots(screenshots: List<PendingScreenshot>): ScreenshotUploadResult {
         val confirmedIds = mutableSetOf<Long>()
         val grouped = screenshots.groupBy { it.sessionId }
         for ((sessionId, shots) in grouped) {
             try {
                 confirmedIds.addAll(uploadScreenshotsForSession(sessionId, shots))
+            } catch (e: HttpStatusException) {
+                if (RetryPolicy.classify(e.result) == UploadOutcome.DROPPED) {
+                    Logger.w("ApiClient: screenshots for session $sessionId refused (${e.message}) — kept for the next flush")
+                } else {
+                    return ScreenshotUploadResult(confirmedIds, e.result)
+                }
+            } catch (e: IOException) {
+                return ScreenshotUploadResult(confirmedIds, ApiResult.NetworkError(e))
             } catch (e: Exception) {
                 Logger.w("ApiClient: screenshot upload failed for session $sessionId: ${e.message}")
             }
         }
-        return confirmedIds
+        return ScreenshotUploadResult(confirmedIds)
     }
 
     private suspend fun uploadScreenshotsForSession(sessionId: String, shots: List<PendingScreenshot>): Set<Long> {
@@ -216,7 +235,12 @@ internal class ApiClient(
             .build()
         client.newCall(request).execute().use { response ->
             val bodyStr = response.body?.string() ?: "{}"
-            if (!response.isSuccessful) throw IOException("HTTP ${response.code}: $bodyStr")
+            if (!response.isSuccessful) {
+                throw HttpStatusException(
+                    ApiResult.failure(response.code, response.header("Retry-After"), bodyStr.take(200)),
+                    response.code
+                )
+            }
             return JSONObject(bodyStr)
         }
     }

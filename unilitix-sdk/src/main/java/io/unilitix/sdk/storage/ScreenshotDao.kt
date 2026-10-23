@@ -25,6 +25,10 @@ internal interface ScreenshotDao {
     @Query("DELETE FROM pending_screenshots WHERE id IN (SELECT id FROM pending_screenshots ORDER BY created_at ASC LIMIT :count)")
     suspend fun deleteOldest(count: Int)
 
+    /** Id and encoded size of every queued screenshot, newest first (for [ScreenshotQueueCap]). */
+    @Query("SELECT id, LENGTH(image_bytes) AS bytes FROM pending_screenshots ORDER BY created_at DESC, id DESC")
+    suspend fun sizesNewestFirst(): List<ScreenshotSize>
+
     @Query("DELETE FROM pending_screenshots WHERE id IN (:ids)")
     suspend fun deleteByIds(ids: List<Long>)
 

@@ -44,6 +44,10 @@ data class UnilitixConfig internal constructor(
     val uploadScreenshotsOnWifiOnly: Boolean,
     val maxScreenshotsPerSession: Int,
     val maskInputsInScreenshots: Boolean,
+    val maskAllText: Boolean,
+    val maskImages: Boolean,
+    val maxScreenshotsPerMinute: Int,
+    val screenshotHeartbeatMs: Long,
 ) {
     /** DSL + Java builder. Var properties support Kotlin `property = value` syntax. */
     class Builder {
@@ -75,14 +79,51 @@ data class UnilitixConfig internal constructor(
         var captureSnapshots: Boolean = true
         // snapshotIntervalMs is clamped to [1s, 60s] at build() time.
         var snapshotIntervalMs: Long = 1_000L
-        var maxSnapshotsPerSession: Int = 200
+        /** Stop capturing view-tree snapshots after this many in one session. Default 1500. */
+        var maxSnapshotsPerSession: Int = 1500
         var captureScreenshots: Boolean = true
+        /** Minimum gap between two screenshots. Default 1000 ms. */
         var screenshotIntervalMs: Long = 1_000L
         var screenshotQuality: Int = 30
         var screenshotMaxWidth: Int = 480
         var uploadScreenshotsOnWifiOnly: Boolean = true
-        var maxScreenshotsPerSession: Int = 300
+        /** Stop capturing screenshots after this many in one session. Default 1500. */
+        var maxScreenshotsPerSession: Int = 1500
         var maskInputsInScreenshots: Boolean = true
+        /**
+         * Mask all text in session replay, not only inputs. Default true.
+         *
+         * Screenshots: every visible `TextView` (including `Button`,
+         * `EditText` and other subclasses) is painted over. Snapshots: text
+         * keeps its word shapes and length but every character becomes `•`.
+         * Exempt views that carry no personal data (headings, button labels,
+         * navigation) with [Unilitix.unmask]. Inputs are always governed by
+         * [maskInputs] / [maskInputsInScreenshots], whatever `unmask` says.
+         *
+         * Jetpack Compose text is not covered: the SDK does not walk Compose
+         * semantics. Wrap sensitive Compose content in a view annotated
+         * [UnilitixPrivate] or list its host view in [maskedViewIds].
+         */
+        var maskAllText: Boolean = true
+        /**
+         * Replace images with placeholders in session replay. Default false.
+         * Screenshots: every `ImageView` with a drawable, and every leaf view
+         * whose background is a bitmap, is painted over. Snapshots: image
+         * nodes are marked `masked` and carry no content. [Unilitix.unmask]
+         * exempts a view and its subtree.
+         */
+        var maskImages: Boolean = false
+        /**
+         * Rolling one-minute screenshot budget, so a screen that animates
+         * continuously cannot flood the session. Default 20.
+         */
+        var maxScreenshotsPerMinute: Int = 20
+        /**
+         * Take a screenshot at least this often on a static screen, so the
+         * replay shows the screen is still up. Default 10000 ms; 0 turns the
+         * heartbeat off. Never shorter than [screenshotIntervalMs].
+         */
+        var screenshotHeartbeatMs: Long = 10_000L
 
         // Method-style setters for Java interop (fluent API).
         fun apiUrl(v: String)                      = apply { apiUrl = v }
@@ -109,6 +150,10 @@ data class UnilitixConfig internal constructor(
         fun uploadScreenshotsOnWifiOnly(v: Boolean)= apply { uploadScreenshotsOnWifiOnly = v }
         fun maxScreenshotsPerSession(v: Int)       = apply { maxScreenshotsPerSession = v }
         fun maskInputsInScreenshots(v: Boolean)    = apply { maskInputsInScreenshots = v }
+        fun maskAllText(v: Boolean)                = apply { maskAllText = v }
+        fun maskImages(v: Boolean)                 = apply { maskImages = v }
+        fun maxScreenshotsPerMinute(v: Int)        = apply { maxScreenshotsPerMinute = v }
+        fun screenshotHeartbeatMs(v: Long)         = apply { screenshotHeartbeatMs = v }
 
         fun build() = UnilitixConfig(
             apiUrl                    = apiUrl,
@@ -134,6 +179,10 @@ data class UnilitixConfig internal constructor(
             uploadScreenshotsOnWifiOnly = uploadScreenshotsOnWifiOnly,
             maxScreenshotsPerSession  = maxScreenshotsPerSession,
             maskInputsInScreenshots   = maskInputsInScreenshots,
+            maskAllText               = maskAllText,
+            maskImages                = maskImages,
+            maxScreenshotsPerMinute   = maxScreenshotsPerMinute.coerceAtLeast(0),
+            screenshotHeartbeatMs     = screenshotHeartbeatMs.coerceAtLeast(0L),
         )
     }
 }

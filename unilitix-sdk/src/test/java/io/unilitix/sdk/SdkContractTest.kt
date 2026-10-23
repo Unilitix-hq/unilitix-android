@@ -3,7 +3,9 @@ package io.unilitix.sdk
 import io.unilitix.sdk.capture.RageTapDetector
 import io.unilitix.sdk.contract.SdkContract
 import io.unilitix.sdk.core.Breadcrumbs
+import io.unilitix.sdk.core.ErrorReportLimiter
 import io.unilitix.sdk.core.Fingerprint
+import io.unilitix.sdk.network.RetryPolicy
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -14,19 +16,28 @@ import org.junit.Test
  * `go run ./cmd/sdkcontract`; copy it over, never edit it by hand.
  *
  * Keys in [SdkContract.divergences] are known gaps with a planned fix and are
- * skipped; removing one from the contract turns its check back on.
+ * skipped, except [FIXED_IN_1_6_0]: this release closes those gaps, so they
+ * are checked even while the contract still lists them.
  */
 class SdkContractTest {
 
-    private fun skipped(key: String) = key in SdkContract.divergences
+    /**
+     * Divergences fixed in unilitix-android 1.6.0. Remove this set once the
+     * contract no longer lists them; the generic checks then cover them.
+     */
+    private val FIXED_IN_1_6_0 = setOf(
+        "maskAllText", "maskImages", "maxScreenshotsPerMinute", "screenshotHeartbeatMs",
+        "maxScreenshotsPerSession", "maxSnapshotsPerSession", "retry", "maxReportsPerFingerprint",
+    )
+
+    private fun skipped(key: String) = key in SdkContract.divergences && key !in FIXED_IN_1_6_0
 
     /** Int, Long and Double defaults compare by value. */
     private fun norm(v: Any?): Any? = if (v is Number) v.toDouble() else v
 
-    @Test
-    fun `config defaults match the contract`() {
+    private fun actualDefaults(): Map<String, Any> {
         val c = UnilitixConfig.Builder().build()
-        val actual: Map<String, Any> = mapOf(
+        return mapOf(
             "apiUrl" to c.apiUrl,
             "debugLogging" to c.debugLogging,
             // Builder-only: the initial state when the user has not decided yet.
@@ -40,6 +51,8 @@ class SdkContractTest {
             "maxOfflineEvents" to c.maxOfflineEvents,
             "sessionTimeoutSeconds" to c.sessionTimeoutSeconds,
             "maskInputs" to c.maskInputs,
+            "maskAllText" to c.maskAllText,
+            "maskImages" to c.maskImages,
             "maskInputsInScreenshots" to c.maskInputsInScreenshots,
             "sampleRate" to c.sampleRate,
             "captureSnapshots" to c.captureSnapshots,
@@ -51,7 +64,14 @@ class SdkContractTest {
             "screenshotMaxWidth" to c.screenshotMaxWidth,
             "uploadScreenshotsOnWifiOnly" to c.uploadScreenshotsOnWifiOnly,
             "maxScreenshotsPerSession" to c.maxScreenshotsPerSession,
+            "maxScreenshotsPerMinute" to c.maxScreenshotsPerMinute,
+            "screenshotHeartbeatMs" to c.screenshotHeartbeatMs,
         )
+    }
+
+    @Test
+    fun `config defaults match the contract`() {
+        val actual = actualDefaults()
         for ((key, want) in SdkContract.defaults) {
             if (skipped(key)) continue
             assertTrue("contract option $key has no UnilitixConfig property", key in actual)
@@ -62,11 +82,33 @@ class SdkContractTest {
     }
 
     @Test
+    fun `1_6_0 replay defaults match the contract`() {
+        val actual = actualDefaults()
+        for (key in listOf(
+            "maskAllText", "maskImages", "maxScreenshotsPerMinute", "screenshotHeartbeatMs",
+            "maxScreenshotsPerSession", "maxSnapshotsPerSession",
+        )) {
+            assertTrue("contract lists $key", key in SdkContract.defaults)
+            assertEquals("default for $key", norm(SdkContract.defaults[key]), norm(actual[key]))
+        }
+    }
+
+    @Test
     fun `fixed limits match the contract`() {
         assertEquals(SdkContract.MAX_BREADCRUMBS, Breadcrumbs.MAX_SIZE.toLong())
         assertEquals(SdkContract.RAGE_TAP_MIN_TAPS, RageTapDetector.MIN_TAPS.toLong())
         assertEquals(SdkContract.RAGE_TAP_WINDOW_MS, RageTapDetector.WINDOW_MS)
         assertEquals(SdkContract.RAGE_TAP_RADIUS, RageTapDetector.RADIUS_DP.toLong())
+        assertEquals(SdkContract.MAX_REPORTS_PER_FINGERPRINT, ErrorReportLimiter.MAX_REPORTS_PER_FINGERPRINT.toLong())
+        assertEquals(SdkContract.MAX_ERROR_REPORTS_PER_SESSION, ErrorReportLimiter.MAX_ERROR_REPORTS_PER_SESSION.toLong())
+    }
+
+    @Test
+    fun `retry constants match the contract`() {
+        assertEquals(SdkContract.RETRY_BASE_DELAY_MS, RetryPolicy.BASE_DELAY_MS)
+        assertEquals(SdkContract.RETRY_MAX_DELAY_MS, RetryPolicy.MAX_DELAY_MS)
+        assertEquals(SdkContract.RETRY_AFTER_MIN_SECONDS, RetryPolicy.RETRY_AFTER_MIN_SECONDS)
+        assertEquals(SdkContract.RETRY_AFTER_MAX_SECONDS, RetryPolicy.RETRY_AFTER_MAX_SECONDS)
     }
 
     @Test
