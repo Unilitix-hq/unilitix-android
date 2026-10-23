@@ -60,7 +60,7 @@ object SdkContract {
         "screenshotHeartbeatMs" to 10000,
     )
 
-    val divergences: List<String> = listOf("maskAllText", "maskImages", "maxReportsPerFingerprint", "maxScreenshotsPerMinute", "maxScreenshotsPerSession", "maxSnapshotsPerSession", "retry", "screenshotHeartbeatMs")
+    val divergences: List<String> = listOf()
 
     data class FingerprintVector(val name: String, val exceptionType: String, val stack: String?, val fingerprint: String)
 

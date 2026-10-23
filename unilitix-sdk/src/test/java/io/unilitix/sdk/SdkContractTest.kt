@@ -16,21 +16,11 @@ import org.junit.Test
  * `go run ./cmd/sdkcontract`; copy it over, never edit it by hand.
  *
  * Keys in [SdkContract.divergences] are known gaps with a planned fix and are
- * skipped, except [FIXED_IN_1_6_0]: this release closes those gaps, so they
- * are checked even while the contract still lists them.
+ * skipped. Since 1.6.0 Android has none.
  */
 class SdkContractTest {
 
-    /**
-     * Divergences fixed in unilitix-android 1.6.0. Remove this set once the
-     * contract no longer lists them; the generic checks then cover them.
-     */
-    private val FIXED_IN_1_6_0 = setOf(
-        "maskAllText", "maskImages", "maxScreenshotsPerMinute", "screenshotHeartbeatMs",
-        "maxScreenshotsPerSession", "maxSnapshotsPerSession", "retry", "maxReportsPerFingerprint",
-    )
-
-    private fun skipped(key: String) = key in SdkContract.divergences && key !in FIXED_IN_1_6_0
+    private fun skipped(key: String) = key in SdkContract.divergences
 
     /** Int, Long and Double defaults compare by value. */
     private fun norm(v: Any?): Any? = if (v is Number) v.toDouble() else v
