@@ -48,6 +48,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import kotlin.random.Random
+import kotlin.math.roundToInt
 
 object Unilitix {
 
@@ -365,7 +366,10 @@ internal class UnilitixInternal(
 
         if (config.autoTrackTaps) {
             val rageTapDetector = if (config.autoTrackRageTaps) {
-                RageTapDetector(application.resources.displayMetrics.density) { screen, x, y ->
+                RageTapDetector { screen, cx, cy ->
+                    // Cluster centre, rounded to whole logical px like TAP.
+                    val x = cx.roundToInt()
+                    val y = cy.roundToInt()
                     scope.launch {
                         emitEvent(
                             UnilitixEvent(
@@ -384,7 +388,7 @@ internal class UnilitixInternal(
                     maskInputs = config.maskInputs,
                     maskedViewIds = config.maskedViewIds
                 ) { screen, x, y, viewId ->
-                    val isRage = rageTapDetector?.recordTap(x, y, screen) ?: false
+                    val isRage = rageTapDetector?.recordTap(x.toFloat(), y.toFloat(), screen) ?: false
                     if (!isRage) {
                         scope.launch {
                             emitEvent(
@@ -416,7 +420,11 @@ internal class UnilitixInternal(
         recoverPendingCrash()
 
         if (config.captureSnapshots) {
-            snapshotCapture = SnapshotCapture(config, isEnabled = { consent.canCapture }) { snapshot ->
+            snapshotCapture = SnapshotCapture(
+                config,
+                isEnabled = { consent.canCapture },
+                sessionId = { sessionManager.currentSession?.id }
+            ) { snapshot ->
                 if (consent.canCapture) snapshotBuffer.add(snapshot)
             }
             application.registerActivityLifecycleCallbacks(snapshotCapture!!)

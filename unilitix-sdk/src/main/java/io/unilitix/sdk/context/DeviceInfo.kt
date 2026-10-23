@@ -9,6 +9,7 @@ import android.os.StatFs
 import android.util.DisplayMetrics
 import android.view.WindowManager
 import io.unilitix.sdk.BuildConfig
+import io.unilitix.sdk.capture.Dp
 import java.util.Locale
 import java.util.TimeZone
 import java.util.UUID
@@ -36,19 +37,26 @@ internal fun collectDeviceInfo(context: Context): DeviceInfo {
     val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
 
     // Use full physical display size — getMetrics() excludes nav bar and gives wrong height.
-    val screenWidth: Int
-    val screenHeight: Int
+    val widthPx: Int
+    val heightPx: Int
+    val density: Float
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
         val bounds = wm.currentWindowMetrics.bounds
-        screenWidth = bounds.width()
-        screenHeight = bounds.height()
+        widthPx = bounds.width()
+        heightPx = bounds.height()
+        density = context.resources.displayMetrics.density
     } else {
         val dm = DisplayMetrics()
         @Suppress("DEPRECATION")
         wm.defaultDisplay.getRealMetrics(dm)
-        screenWidth = dm.widthPixels
-        screenHeight = dm.heightPixels
+        widthPx = dm.widthPixels
+        heightPx = dm.heightPixels
+        density = dm.density
     }
+    // Sent in dp (logical px), like iOS points and Flutter logical pixels;
+    // screenDensity stays the pixels-per-dp factor.
+    val screenWidth = Dp.of(widthPx, density)
+    val screenHeight = Dp.of(heightPx, density)
 
     val orientation = if (context.resources.configuration.orientation == Configuration.ORIENTATION_LANDSCAPE) {
         "LANDSCAPE"
@@ -88,14 +96,7 @@ internal fun collectDeviceInfo(context: Context): DeviceInfo {
         osVersion = Build.VERSION.RELEASE,
         screenWidth = screenWidth,
         screenHeight = screenHeight,
-        screenDensity = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            context.resources.displayMetrics.density
-        } else {
-            val dm = DisplayMetrics()
-            @Suppress("DEPRECATION")
-            wm.defaultDisplay.getRealMetrics(dm)
-            dm.density
-        },
+        screenDensity = density,
         orientation = orientation,
         locale = Locale.getDefault().toLanguageTag(),
         timezone = TimeZone.getDefault().id,

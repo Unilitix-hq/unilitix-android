@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("com.unilitix:unilitix-android:1.6.0")
+implementation("com.unilitix:unilitix-android:1.6.1")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -57,8 +57,8 @@ Unilitix.trackScreen("CheckoutScreen")
 | Feature | Description |
 |---|---|
 | Screen views | Every Activity and Fragment resume |
-| Taps | x/y coordinates, view class/id |
-| Rage taps | 3+ taps in 1 second on same area |
+| Taps | x/y in dp (logical px) from the window's top-left corner, view class/id |
+| Rage taps | 3+ taps in 1 second within 100 dp of each other on one screen |
 | Crashes | Stack trace + last 10 breadcrumbs |
 | Network type | 2G / 3G / 4G / 5G / WiFi |
 | Device info | Manufacturer, model, OS version |
@@ -111,6 +111,15 @@ value passed to `init` (which only applies until the user has decided on this de
 Snapshots held while pending are kept in memory only (at most 300) and are lost if
 the process dies before consent is granted.
 
+### Units
+
+Everything positional the SDK sends is in dp (Android's logical pixels, the
+SDK contract's "logical px", iOS points): tap and rage-tap `x`/`y`, snapshot
+node bounds, snapshot and screenshot `viewportWidth`/`viewportHeight`, and the
+device `screenWidth`/`screenHeight`. Positions are measured from the window's
+top-left corner. `screenDensity` is the pixels-per-dp factor. Screenshot images
+keep their pixel size (up to `screenshotMaxWidth`).
+
 ### Replay privacy
 
 | Option | Default | Effect |
@@ -118,7 +127,8 @@ the process dies before consent is granted.
 | `maskAllText` | `true` | Every `TextView` (incl. `Button`, `EditText`) is painted over in screenshots; snapshot text becomes `•••` |
 | `maskImages` | `false` | Every `ImageView` and bitmap background is painted over; snapshot image nodes carry no content |
 | `maskInputs` / `maskInputsInScreenshots` | `true` | Inputs masked (passwords always) |
-| `maskedViewIds`, `@UnilitixPrivate` | — | Always masked, whatever else is set |
+| `maskedViewIds`, `@UnilitixPrivate` | — | Always masked, whatever else is set; in snapshots the view is one `masked` node (type and bounds only, no text, no children) |
+| `WebView` (snapshots) | — | One node, never walked; `masked` while `maskAllText` or `maskInputs` is on (unless unmasked) |
 
 Show views that carry no personal data (headings, button labels, navigation) with
 `Unilitix.unmask(view)` — it applies to the view and everything inside it — or in XML:

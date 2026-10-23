@@ -102,14 +102,21 @@ class SdkContractTest {
     }
 
     @Test
-    fun `rage tap radius scales with density`() {
+    fun `rage tap radius is 100 logical px`() {
+        // Taps arrive in dp (logical px), so the contract radius applies as is.
         var fired = 0
-        val detector = RageTapDetector(density = 3f) { _, _, _ -> fired++ }
-        // 250 physical px apart is 83 dp on a 3x screen: inside the 100 dp radius.
+        val detector = RageTapDetector { _, _, _ -> fired++ }
+        // The cluster is measured around the newest tap.
         detector.recordTap(0f, 0f, "Home")
-        detector.recordTap(250f, 0f, "Home")
-        detector.recordTap(125f, 0f, "Home")
-        assertEquals(1, fired)
+        detector.recordTap(100f, 0f, "Home")
+        detector.recordTap(0f, 100f, "Home")
+        assertEquals("100 dp apart per axis is inside the radius", 1, fired)
+
+        val far = RageTapDetector { _, _, _ -> fired++ }
+        far.recordTap(0f, 0f, "Home")
+        far.recordTap(101f, 0f, "Home")
+        far.recordTap(0f, 0f, "Home")
+        assertEquals("101 dp apart is outside the radius", 1, fired)
     }
 
     @Test

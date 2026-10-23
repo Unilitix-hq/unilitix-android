@@ -13,7 +13,6 @@ import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
-import android.util.DisplayMetrics
 import android.text.InputType
 import android.view.View
 import android.view.ViewGroup
@@ -142,21 +141,12 @@ internal class ScreenshotCapture(
         val currentOrdinal = ordinal++
         val screenName = activity.javaClass.simpleName
 
-        // Full physical display size — rootView excludes nav bar on non-edge-to-edge builds.
-        val viewportW: Int
-        val viewportH: Int
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val bounds = activity.windowManager.currentWindowMetrics.bounds
-            viewportW = bounds.width()
-            viewportH = bounds.height()
-        } else {
-            @Suppress("DEPRECATION")
-            val dm = DisplayMetrics()
-            @Suppress("DEPRECATION")
-            activity.windowManager.defaultDisplay.getRealMetrics(dm)
-            viewportW = dm.widthPixels
-            viewportH = dm.heightPixels
-        }
+        // The window in dp (logical px): the coordinate space taps are reported
+        // in, for overlaying them on the frame. The image itself keeps its pixels.
+        val window = WindowGeometry.windowPixels(activity)
+        val density = WindowGeometry.density(activity)
+        val viewportW = Dp.of(window.right - window.left, density)
+        val viewportH = Dp.of(window.bottom - window.top, density)
 
         // Collect rects on main thread — View access is only safe here.
         // Private views and maskedViewIds are always masked; text, inputs and
