@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("com.unilitix:unilitix-android:1.5.1")
+implementation("com.unilitix:unilitix-android:1.5.2")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
