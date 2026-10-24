@@ -5,8 +5,8 @@ package io.unilitix.sdk.contract
 
 /** The Unilitix SDK contract (see sdk-contract.md in the api repo). */
 object SdkContract {
-    const val VERSION: String = "1.2.0"
-    val eventTypes: List<String> = listOf("SESSION_START", "TAP", "RAGE_TAP", "SCROLL", "NAVIGATE", "CUSTOM", "EXCEPTION", "CRASH")
+    const val VERSION: String = "1.3.0"
+    val eventTypes: List<String> = listOf("SESSION_START", "TAP", "RAGE_TAP", "SCROLL", "NAVIGATE", "CUSTOM", "EXCEPTION", "CRASH", "ANR")
     val eventTypeAliases: Map<String, String> = mapOf("NAV" to "NAVIGATE")
     val networkTypes: List<String> = listOf("WIFI", "4G", "3G", "2G")
     val consentStates: List<String> = listOf("granted", "pending", "denied")
@@ -68,6 +68,8 @@ object SdkContract {
         FingerprintVector("no stack", "StateError", null, "784c89e082adf0f1"),
         FingerprintVector("jvm", "java.lang.IllegalStateException", "java.lang.IllegalStateException: cart empty\n\tat com.shop.cart.CartService.checkout(CartService.kt:42)\n\tat com.shop.ui.CheckoutActivity.onPay(CheckoutActivity.kt:118)\n\tat android.view.View.performClick(View.java:7448)\n\tat android.os.Handler.handleCallback(Handler.java:938)", "76bec3cae7c2c295"),
         FingerprintVector("jvm native method", "java.lang.reflect.InvocationTargetException", "\tat java.lang.reflect.Method.invoke(Native Method)\n\tat com.a.B.c(B.java:1)", "8ca3b8f5c4b62b3e"),
+        FingerprintVector("android anr main thread", "ANR", "\"main\" prio=5 tid=1 Native\n  native: #00 pc 000000000009a1b8  /apex/com.android.runtime/lib64/bionic/libc.so (read+8)\n  native: #01 pc 0000000000012c34  /system/lib64/libsqlite.so (unixRead+52)\n  at android.database.sqlite.SQLiteConnection.nativeExecuteForCursorWindow(Native method)\n  at android.database.sqlite.SQLiteConnection.executeForCursorWindow(SQLiteConnection.java:1001)\n  - locked <0x0b1c2d3e> (a android.database.sqlite.SQLiteConnection)\n  at com.shop.cart.CartRepository.load(CartRepository.kt:88)\n  at com.shop.ui.CheckoutActivity.onPay(CheckoutActivity.kt:118)", "ff80a5189f547c4d"),
+        FingerprintVector("android anr main thread, other device", "ANR", "\"main\" prio=5 tid=1 Native\n  | group=\"main\" sCount=1 ucsCount=0 flags=1 obj=0x72a1b2c8 self=0xb400007a1c2d3e40\n  | sysTid=9120 nice=-10 cgrp=top-app sched=0/0 handle=0x7b9e1f44f8\n  native: #00 pc 00000000000a0c44  /apex/com.android.runtime/lib64/bionic/libc.so (read+4)\n  at android.database.sqlite.SQLiteConnection.nativeExecuteForCursorWindow(Native method)\n  at android.database.sqlite.SQLiteConnection.executeForCursorWindow(SQLiteConnection.java:1012)\n  at com.shop.cart.CartRepository.load(CartRepository.kt:91)", "ff80a5189f547c4d"),
         FingerprintVector("non-ascii", "Ошибка", "#0      Café.naïve (package:é/ü.dart:1:2)", "64b3189790c14476"),
     )
 }

@@ -199,7 +199,7 @@ class NativeCrashTest {
     }
 
     @Test
-    fun `only native crashes are reported, JVM crashes and ANRs are not`() {
+    fun `native crashes are reported as crashes, ANRs separately, JVM crashes not at all`() {
         val exits = listOf(
             exit(ProcessExits.REASON_CRASH, crashedAt + 1, "crash"),
             exit(ProcessExits.REASON_CRASH_NATIVE, crashedAt + 2, "Fatal signal 11 (SIGSEGV)"),
@@ -212,7 +212,9 @@ class NativeCrashTest {
         assertEquals(11, scan.crashes[0].signal)
         assertEquals(crashedAt + 2, scan.crashes[0].timestampMs)
         assertEquals("8f1fc15bfa06be00", scan.crashes[0].fingerprint)
-        assertEquals("ANRs are selected for the future hook, not reported", 1, scan.anrs.size)
+        assertEquals("ANRs are reported as ANRs (1.9.0), not crashes", 1, scan.anrs.size)
+        assertEquals(crashedAt + 3, scan.anrs[0].timestampMs)
+        assertEquals("Input dispatching timed out", scan.anrs[0].exceptionMessage)
         assertEquals(crashedAt + 5, scan.watermark)
     }
 

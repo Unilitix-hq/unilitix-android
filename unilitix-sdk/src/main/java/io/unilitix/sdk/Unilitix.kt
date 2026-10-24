@@ -3,6 +3,8 @@ package io.unilitix.sdk
 import android.app.Application
 import android.view.View
 import io.unilitix.sdk.BuildConfig
+import io.unilitix.sdk.capture.Anr
+import io.unilitix.sdk.capture.AnrTrace
 import io.unilitix.sdk.capture.CrashHandler
 import io.unilitix.sdk.capture.NativeCrash
 import io.unilitix.sdk.capture.NativeCrashFile
@@ -582,6 +584,9 @@ internal class UnilitixInternal(
      * (marked crashed, ended at the crash), or to the current session when
      * none matches. Denied consent drops them; pending holds them on the
      * device. Runs before this session's first batch is persisted.
+     *
+     * From 1.9.0 the same scan reports `REASON_ANR` exits as ANR events
+     * ([reportAnrs]).
      */
     private suspend fun reportNativeCrashes(record: String?) {
         val crashes = mutableListOf<NativeCrash>()
@@ -590,13 +595,17 @@ internal class UnilitixInternal(
             if (parsed != null) crashes.add(parsed)
             else Logger.w("Unilitix: native crash record could not be read; dropped")
         }
+        var anrs = emptyList<Anr>()
         if (android.os.Build.VERSION.SDK_INT >= 30) {
             // Always scanned, so the watermark moves even when nothing is reported.
             val exits = readProcessExits()
-            crashes += ProcessExits.scan(SharedPreferencesStore(prefs), exits, System.currentTimeMillis()).crashes
+            val scan = ProcessExits.scan(SharedPreferencesStore(prefs), exits, System.currentTimeMillis())
+            crashes += scan.crashes
+            anrs = scan.anrs
         }
-        if (crashes.isEmpty()) return
         if (!config.autoTrackCrashes) return
+        if (anrs.isNotEmpty()) reportAnrs(anrs)
+        if (crashes.isEmpty()) return
 
         val placements = NativeCrashReporter(sessionHistory)
             .place(crashes, consent.state, sessionManager.currentSession?.id)
@@ -626,6 +635,55 @@ internal class UnilitixInternal(
         if (persisted && consent.canUpload && !uploadGate.isPaused) flushScheduler.scheduleFlush()
     }
 
+    /**
+     * ANRs of earlier processes (1.9.0): each goes to the session that was
+     * running when the process was killed, which ends then but is not marked
+     * crashed (an ANR is not a crash), or to the current session when none
+     * matches. Consent applies as for native crashes.
+     */
+    private suspend fun reportAnrs(anrs: List<Anr>) {
+        val placements = NativeCrashReporter(sessionHistory)
+            .placeAnrs(anrs, consent.state, sessionManager.currentSession?.id)
+        if (placements.isEmpty()) {
+            Logger.d("Unilitix: ${anrs.size} ANR(s) from an earlier launch dropped (consent denied)")
+            return
+        }
+        val now = System.currentTimeMillis()
+        val persisted = queueMutex.withLock {
+            if (!consent.canCapture) return@withLock false
+            for (p in placements) {
+                val event = AnrTrace.toEvent(p.anr, now, ::isoTimestamp)
+                val sessionJson = if (p.session != null) {
+                    Logger.d("Unilitix: ANR ${p.anr.fingerprint} reported against session ${p.session.id.take(8)}")
+                    endedSessionJson(p.session, p.anr.timestampMs)
+                } else {
+                    Logger.d("Unilitix: ANR ${p.anr.fingerprint}: no stored session matches; reported in the current one")
+                    buildSessionJson(sessionManager.currentSession)
+                }
+                database.eventDao().insert(
+                    PendingEvent(sessionJson = sessionJson, eventsJson = Json.toJson(listOf(event)))
+                )
+            }
+            true
+        }
+        if (persisted && consent.canUpload && !uploadGate.isPaused) flushScheduler.scheduleFlush()
+    }
+
+    /** The ANR session's record: its duration ending when the process was killed; `crashed` untouched. */
+    private fun endedSessionJson(entry: SessionHistory.Entry, endedAtMs: Long?): String {
+        val base = entry.sessionJson
+            ?: buildSessionJson(Session(id = entry.id, startedAt = entry.startedAt))
+        return try {
+            val obj = org.json.JSONObject(base)
+            val endedAt = SessionHistory.endedAt(entry, endedAtMs)
+            obj.put("endedAt", isoTimestamp(endedAt))
+            obj.put("durationMs", (endedAt - entry.startedAt).coerceAtLeast(0L))
+            obj.toString()
+        } catch (e: Exception) {
+            base
+        }
+    }
+
     /** The crashed session's record: `crashed`, and its duration ending at the crash. */
     private fun crashedSessionJson(entry: SessionHistory.Entry, crashedAt: Long?): String {
         val base = entry.sessionJson
@@ -652,11 +710,17 @@ internal class UnilitixInternal(
                     timestampMs = info.timestamp,
                     pid = info.pid,
                     description = info.description,
+                    importance = info.importance,
                     readTrace = {
-                        // Native crashes carry the tombstone (protobuf) from API 31.
-                        if (info.reason == ProcessExits.REASON_CRASH_NATIVE) {
-                            info.traceInputStream?.use { readPrefix(it, MAX_TRACE_BYTES) }
-                        } else null
+                        // Native crashes carry the tombstone (protobuf) from API 31;
+                        // ANRs the text thread dump from API 30.
+                        when (info.reason) {
+                            ProcessExits.REASON_CRASH_NATIVE ->
+                                info.traceInputStream?.use { readPrefix(it, MAX_TRACE_BYTES) }
+                            ProcessExits.REASON_ANR ->
+                                info.traceInputStream?.use { readPrefix(it, AnrTrace.MAX_TRACE_BYTES) }
+                            else -> null
+                        }
                     }
                 )
             }
