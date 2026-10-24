@@ -7,3 +7,7 @@ build/
 *.class
 *.dex
 local.properties
+
+# NDK / CMake build caches (contain absolute local paths)
+.cxx/
+.externalNativeBuild/
