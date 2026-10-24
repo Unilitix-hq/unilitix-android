@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.10.0
+
+### Added
+- **Native crash stack traces.** Native (NDK) `CRASH` reports now carry the
+  crashed thread's backtrace as `stackTrace`, in Android tombstone format
+  (`#00 pc <rel_pc>  <library path> (function+offset) (BuildId: <hex>)`, up to
+  64 frames), so the API can symbolicate it with the app's unstripped
+  libraries (`unilitix-cli upload-symbols --type ndk`, API with migration
+  000061).
+  - Android 12+ (API 31+): read from the tombstone `ApplicationExitInfo`
+    returns (crashing thread's `current_backtrace`, pure-Kotlin protobuf
+    reader; up to 1 MB of the trace is read). API 30 keeps the signal-only
+    report.
+  - Android 5–10 (API 21–29): the signal handler unwinds the crashed thread
+    (`_Unwind_Backtrace`, at most 64 frames) and resolves each frame's library,
+    `rel_pc` and build id from `/proc/self/maps` and the in-memory ELF
+    headers, with static buffers only. It first writes the 1.9.0 signal-only
+    record; memory faults while capturing are caught (SIGSEGV/SIGBUS unblocked
+    for that thread, `siglongjmp` back) and abandon the capture; the full
+    record replaces the first via `native_crash.json.tmp` + `rename`.
+- README: Gradle task to upload native symbols after the release build.
+
+### Unchanged
+- Grouping: a `SIGNAL` crash's fingerprint is still `SIGNAL:<n>` (`SIGNAL`
+  when unknown) and never includes the frames; `SIGNAL:11` is still
+  `8f1fc15bfa06be00`. Event shape is otherwise the same (no new metadata).
+
+### Notes
+- Frames in OS libraries stay as the device printed them; only the app's
+  libraries need uploads. Function names in the device's frames are the
+  library's exported names (often mangled C++); the server's symbolicated view
+  names functions from DWARF.
+- `libunilitix-native.so` grows by a few KB per ABI (unwinder and the new
+  capture code); it is still loaded only on API 21–29. Still one C file
+  (`unilitix_native.c`, no header), so the Flutter plugin's
+  `scripts/sync-android-native.sh` vendors it unchanged.
+
 ## 1.9.0
 
 ### Added

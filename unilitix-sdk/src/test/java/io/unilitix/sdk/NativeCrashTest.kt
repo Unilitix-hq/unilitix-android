@@ -6,6 +6,7 @@ import io.unilitix.sdk.capture.NativeCrashReporter
 import io.unilitix.sdk.capture.NativeSignalHandler
 import io.unilitix.sdk.capture.ProcessExit
 import io.unilitix.sdk.capture.ProcessExits
+import io.unilitix.sdk.capture.Tombstone
 import io.unilitix.sdk.capture.TombstoneSignal
 import io.unilitix.sdk.core.Fingerprint
 import io.unilitix.sdk.core.KeyValueStore
@@ -317,6 +318,163 @@ class NativeCrashTest {
         assertEquals(1, scan.crashes.size)
         assertNull(scan.crashes[0].signal)
         assertEquals(Fingerprint.of("SIGNAL", null), scan.crashes[0].fingerprint)
+    }
+
+    // Tombstone backtrace (1.10.0): Tombstone.threads[tid].current_backtrace.
+
+    private fun frame(
+        relPc: Long, file: String, function: String? = null, functionOffset: Long = 0,
+        fileMapOffset: Long = 0, buildId: String? = null
+    ): ByteArray = ByteArrayOutputStream().apply {
+        varintField(1, relPc)                                   // uint64 rel_pc
+        varintField(2, 0x7a00000000L + relPc)                  // uint64 pc
+        varintField(3, 0x7ff0001000L)                          // uint64 sp
+        if (function != null) bytesField(4, function.toByteArray())
+        if (functionOffset != 0L) varintField(5, functionOffset)
+        bytesField(6, file.toByteArray())                      // string file_name
+        if (fileMapOffset != 0L) varintField(7, fileMapOffset)
+        if (buildId != null) bytesField(8, buildId.toByteArray())
+    }.toByteArray()
+
+    private fun thread(id: Int, name: String, frames: List<ByteArray>): ByteArray = ByteArrayOutputStream().apply {
+        varintField(1, id.toLong())                            // int32 id
+        bytesField(2, name.toByteArray())                      // string name
+        bytesField(3, ByteArray(20) { 1 })                     // a Register, skipped
+        frames.forEach { bytesField(4, it) }                   // repeated BacktraceFrame current_backtrace
+        bytesField(5, ByteArray(64) { 2 })                     // a MemoryDump, skipped
+    }.toByteArray()
+
+    private fun threadEntry(tid: Int, thread: ByteArray): ByteArray = ByteArrayOutputStream().apply {
+        varintField(1, tid.toLong())                           // map key
+        bytesField(2, thread)                                  // map value
+    }.toByteArray()
+
+    private val lib = "/data/app/~~Xy==/com.shop-Ab==/lib/arm64/libshop.so"
+    private val crashFrames = listOf(
+        frame(0x1a2b4, lib, buildId = "9F2C00AA"),
+        frame(0x1a1f0, lib, "Java_com_shop_Native_pay", 40, buildId = "9f2c00aa"),
+        frame(0x2b4000, "/data/app/~~Xy==/com.shop-Ab==/base.apk!libother.so", "_ZN4cart8checkoutEi", 8, fileMapOffset = 0x2b4000, buildId = "abcd"),
+        frame(0x356f20, "/apex/com.android.art/lib64/libart.so", "art_quick_generic_jni_trampoline", 144, buildId = "5e6f7a8b"),
+        frame(0x1234, "[anon:dalvik-jit-code-cache]"),
+        frame(0x10, "", "evil\nname")
+    )
+
+    private fun nativeTombstone(arch: Int = 1, tidFirst: Boolean = true, crashedTid: Int = 4321): ByteArray = ByteArrayOutputStream().apply {
+        varintField(1, arch.toLong())
+        bytesField(2, "google/raven/raven:14/UQ1A".toByteArray())
+        varintField(5, 4321)
+        if (tidFirst) varintField(6, crashedTid.toLong())
+        bytesField(10, signalInfo(11))
+        bytesField(16, threadEntry(4400, thread(4400, "RenderThread", listOf(frame(0x99, "/system/lib64/libhwui.so", "draw", 4)))))
+        bytesField(16, threadEntry(4321, thread(4321, "com.shop", crashFrames)))
+        if (!tidFirst) varintField(6, crashedTid.toLong())
+        bytesField(17, ByteArray(500) { 3 })                   // memory_mappings: not needed
+    }.toByteArray()
+
+    @Test
+    fun `tombstone backtrace is the crashing thread in tombstone text format`() {
+        val info = Tombstone.parse(nativeTombstone())!!
+        assertEquals(11, info.signal)
+        assertEquals(
+            listOf(
+                "#00 pc 000000000001a2b4  $lib (BuildId: 9f2c00aa)",
+                "#01 pc 000000000001a1f0  $lib (Java_com_shop_Native_pay+40) (BuildId: 9f2c00aa)",
+                "#02 pc 00000000002b4000  /data/app/~~Xy==/com.shop-Ab==/base.apk!libother.so (offset 0x2b4000) (_ZN4cart8checkoutEi+8) (BuildId: abcd)",
+                "#03 pc 0000000000356f20  /apex/com.android.art/lib64/libart.so (art_quick_generic_jni_trampoline+144) (BuildId: 5e6f7a8b)",
+                "#04 pc 0000000000001234  [anon:dalvik-jit-code-cache]",
+                "#05 pc 0000000000000010  <unknown> (evil?name)"
+            ),
+            info.backtrace!!.lines()
+        )
+        // tid after the threads (field order is not relied on).
+        assertEquals(info.backtrace, Tombstone.parse(nativeTombstone(tidFirst = false))!!.backtrace)
+    }
+
+    @Test
+    fun `32-bit tombstones print 8-digit pcs`() {
+        val arm32 = Tombstone.parse(nativeTombstone(arch = 0))!!.backtrace!!
+        assertTrue(arm32, arm32.startsWith("#00 pc 0001a2b4  $lib"))
+        assertTrue(Tombstone.parse(nativeTombstone(arch = 2))!!.backtrace!!.startsWith("#00 pc 0001a2b4  "))
+        assertTrue(Tombstone.parse(nativeTombstone(arch = 3))!!.backtrace!!.startsWith("#00 pc 000000000001a2b4  "))
+    }
+
+    @Test
+    fun `no crashing thread or a cut inside the threads keeps the signal only`() {
+        val unknownTid = Tombstone.parse(nativeTombstone(crashedTid = 1))!!
+        assertEquals(11, unknownTid.signal)
+        assertNull(unknownTid.backtrace)
+        val full = nativeTombstone()
+        // Cut inside the crashing thread's entry: signal yes, frames no.
+        val cut = full.copyOf(full.size - 600)
+        assertEquals(11, Tombstone.parse(cut)!!.signal)
+        assertNull(Tombstone.parse(cut)!!.backtrace)
+        // Cut after the threads (inside memory_mappings): both.
+        assertNotNull(Tombstone.parse(full.copyOf(full.size - 100))!!.backtrace)
+        // The old reader's view is unchanged.
+        assertEquals(11, TombstoneSignal.parse(full))
+    }
+
+    @Test
+    fun `at most 64 frames are kept`() {
+        val many = (0 until 100).map { frame(0x1000L + it, lib, buildId = "aa") }
+        val bytes = ByteArrayOutputStream().apply {
+            varintField(6, 7)
+            bytesField(16, threadEntry(7, thread(7, "main", many)))
+        }.toByteArray()
+        val info = Tombstone.parse(bytes)!!
+        assertNull(info.signal)
+        assertEquals(Tombstone.MAX_FRAMES, info.backtrace!!.lines().size)
+        assertTrue(info.backtrace.lines().last().startsWith("#63 pc "))
+    }
+
+    @Test
+    fun `native crash from exit info carries the backtrace and keeps its SIGNAL fingerprint`() {
+        val scan = ProcessExits.select(
+            listOf(exit(ProcessExits.REASON_CRASH_NATIVE, crashedAt + 1, "Fatal signal 6 (SIGABRT)", nativeTombstone())),
+            crashedAt, launchedAt
+        )
+        val crash = scan.crashes.single()
+        assertEquals(11, crash.signal)
+        assertTrue(crash.stackTrace!!.startsWith("#00 pc 000000000001a2b4  $lib (BuildId: 9f2c00aa)\n#01 pc "))
+        assertEquals("grouping unchanged: SIGNAL:11", "8f1fc15bfa06be00", crash.fingerprint)
+        val e = NativeCrashRecord.toEvent(crash, launchedAt, ::iso)
+        assertEquals(crash.stackTrace, e["stackTrace"])
+        assertEquals("SIGNAL: Fatal signal 11 (SIGSEGV)", e["title"])
+        @Suppress("UNCHECKED_CAST")
+        assertEquals("8f1fc15bfa06be00", (e["metadata"] as Map<String, Any?>)["fingerprint"])
+        // Description only (API 30, or no tombstone): as before, no stack.
+        val noTrace = ProcessExits.crashOf(exit(ProcessExits.REASON_CRASH_NATIVE, crashedAt, "Fatal signal 6 (SIGABRT)"))
+        assertEquals(6, noTrace.signal)
+        assertNull(noTrace.stackTrace)
+        assertEquals(Fingerprint.of("SIGNAL:6", null), noTrace.fingerprint)
+    }
+
+    @Test
+    fun `signal record with a backtrace from the API 21-29 handler keeps its SIGNAL fingerprint`() {
+        // Exactly what libunilitix-native.so writes from 1.10.0.
+        val text = """{"platform":"android","exceptionType":"SIGNAL","signal":11,"timestamp":$crashedAt,""" +
+            """"stackTrace":"#00 pc 000000000001a2b4  $lib (BuildId: 9f2c00aa)\n#01 pc 000000000001a1f0  $lib (BuildId: 9f2c00aa)"}"""
+        val crash = NativeCrashRecord.parse(text)!!
+        assertEquals("#00 pc 000000000001a2b4  $lib (BuildId: 9f2c00aa)\n#01 pc 000000000001a1f0  $lib (BuildId: 9f2c00aa)", crash.stackTrace)
+        assertEquals("8f1fc15bfa06be00", crash.fingerprint)
+        assertEquals(Fingerprint.of("SIGNAL", null), NativeCrashRecord.fingerprint("SIGNAL", null, crash.stackTrace))
+        // A non-signal record from another SDK still hashes its stack.
+        assertEquals(Fingerprint.of("NSRangeException", "#0 a (b.dart:1)"), NativeCrashRecord.fingerprint("NSRangeException", null, "#0 a (b.dart:1)"))
+    }
+
+    @Test
+    fun `a half-written backtrace record is discarded with the record`() {
+        val dir = Files.createTempDirectory("unilitix").toFile()
+        try {
+            val file = NativeCrashFile.locate(dir)
+            file.parentFile!!.mkdirs()
+            file.writeText(signalRecord(11))
+            NativeCrashFile.pending(file).writeText("""{"platform":"android","exceptionType":"SIGNAL","signal":11,"stackTrace":"#00 p""")
+            assertEquals(signalRecord(11), NativeCrashFile.consume(file))
+            assertFalse(NativeCrashFile.pending(file).exists())
+        } finally {
+            dir.deleteRecursively()
+        }
     }
 
     // ── Attribution and consent ──────────────────────────────────────

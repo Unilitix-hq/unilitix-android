@@ -895,8 +895,12 @@ internal class UnilitixInternal(
     }
 
     private companion object {
-        /** Cap on reading a native crash's tombstone (signal_info is near the start). */
-        const val MAX_TRACE_BYTES = 256 * 1024
+        /**
+         * Cap on reading a native crash's tombstone: signal_info is near the
+         * start, the threads (with the crashing thread's backtrace) follow;
+         * memory maps and logs come after them and are not needed.
+         */
+        const val MAX_TRACE_BYTES = 1024 * 1024
         /** How long a flush waits for earlier native crashes to be queued. */
         const val NATIVE_CRASH_WAIT_MS = 5_000L
     }
