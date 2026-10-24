@@ -4,6 +4,13 @@ import android.app.Application
 import android.view.View
 import io.unilitix.sdk.BuildConfig
 import io.unilitix.sdk.capture.CrashHandler
+import io.unilitix.sdk.capture.NativeCrash
+import io.unilitix.sdk.capture.NativeCrashFile
+import io.unilitix.sdk.capture.NativeCrashRecord
+import io.unilitix.sdk.capture.NativeCrashReporter
+import io.unilitix.sdk.capture.NativeSignalHandler
+import io.unilitix.sdk.capture.ProcessExit
+import io.unilitix.sdk.capture.ProcessExits
 import io.unilitix.sdk.capture.PerformanceMonitor
 import io.unilitix.sdk.capture.RageTapDetector
 import io.unilitix.sdk.capture.ScreenTracker
@@ -24,6 +31,7 @@ import io.unilitix.sdk.core.EventBuffer
 import io.unilitix.sdk.core.Fingerprint
 import io.unilitix.sdk.core.Identity
 import io.unilitix.sdk.core.Session
+import io.unilitix.sdk.core.SessionHistory
 import io.unilitix.sdk.core.SessionManager
 import io.unilitix.sdk.core.SnapshotBuffer
 import io.unilitix.sdk.core.UnilitixEvent
@@ -37,6 +45,7 @@ import io.unilitix.sdk.storage.ScreenshotQueueCap
 import io.unilitix.sdk.util.Json
 import java.io.File
 import io.unilitix.sdk.util.Logger
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -329,6 +338,18 @@ internal class UnilitixInternal(
     /** maxReportsPerFingerprint / maxErrorReportsPerSession; reset on every session start. */
     internal val errorLimiter = ErrorReportLimiter()
 
+    /** Recent sessions, for attributing a native crash on the next launch. */
+    private val sessionHistory = SessionHistory(SharedPreferencesStore(prefs))
+
+    /** Where the native signal handler (API 21-29) writes: files/unilitix/native_crash.json. */
+    private val nativeCrashFile = NativeCrashFile.locate(application.filesDir)
+
+    /**
+     * Completed once native crashes of earlier processes are in the queue:
+     * flushNow waits for it, so they go before this session's events.
+     */
+    private val nativeCrashesQueued = CompletableDeferred<Unit>()
+
     private var snapshotCapture: SnapshotCapture? = null
     private var screenshotCapture: ScreenshotCapture? = null
 
@@ -336,6 +357,7 @@ internal class UnilitixInternal(
         sessionTimeoutSeconds = config.sessionTimeoutSeconds,
         onSessionStart = { session ->
             Logger.d("✅ Session started | id=${session.id}")
+            if (consent.canCapture) sessionHistory.recordStart(session.id, session.startedAt)
             screenshotCapture?.resetOrdinal()
             snapshotCapture?.resetSession()
             errorLimiter.resetSession()
@@ -405,6 +427,10 @@ internal class UnilitixInternal(
             )
         }
 
+        // Before any handler of this process can write a new one: the record an
+        // earlier process left (API 21-29), read and deleted exactly once.
+        val nativeRecord = NativeCrashFile.consume(nativeCrashFile)
+
         if (config.autoTrackCrashes) {
             CrashHandler(
                 context = application,
@@ -415,9 +441,21 @@ internal class UnilitixInternal(
                 isEnabled = { consent.canCapture },
                 admitReport = { fingerprint -> errorLimiter.admit(fingerprint) != null }
             ).install()
+            // API 21-29 only; API 30+ reads ApplicationExitInfo instead.
+            NativeSignalHandler.install(nativeCrashFile)
         }
 
         recoverPendingCrash()
+
+        scope.launch {
+            try {
+                reportNativeCrashes(nativeRecord)
+            } catch (e: Exception) {
+                Logger.w("Unilitix: native crash report failed: ${e.message}")
+            } finally {
+                nativeCrashesQueued.complete(Unit)
+            }
+        }
 
         if (config.captureSnapshots) {
             snapshotCapture = SnapshotCapture(
@@ -514,6 +552,109 @@ internal class UnilitixInternal(
         }
     }
 
+    /**
+     * Reports native crashes of earlier processes (UnilitixCore 0.5.0
+     * behaviour): the record the signal handler left (API 21-29) and, on
+     * API 30+, `REASON_CRASH_NATIVE` exits newer than the stored watermark.
+     * Each goes to the session that was running when the process died
+     * (marked crashed, ended at the crash), or to the current session when
+     * none matches. Denied consent drops them; pending holds them on the
+     * device. Runs before this session's first batch is persisted.
+     */
+    private suspend fun reportNativeCrashes(record: String?) {
+        val crashes = mutableListOf<NativeCrash>()
+        if (record != null) {
+            val parsed = NativeCrashRecord.parse(record)
+            if (parsed != null) crashes.add(parsed)
+            else Logger.w("Unilitix: native crash record could not be read; dropped")
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 30) {
+            // Always scanned, so the watermark moves even when nothing is reported.
+            val exits = readProcessExits()
+            crashes += ProcessExits.scan(SharedPreferencesStore(prefs), exits, System.currentTimeMillis()).crashes
+        }
+        if (crashes.isEmpty()) return
+        if (!config.autoTrackCrashes) return
+
+        val placements = NativeCrashReporter(sessionHistory)
+            .place(crashes, consent.state, sessionManager.currentSession?.id)
+        if (placements.isEmpty()) {
+            Logger.d("Unilitix: ${crashes.size} native crash(es) from an earlier launch dropped (consent denied)")
+            return
+        }
+        val now = System.currentTimeMillis()
+        val persisted = queueMutex.withLock {
+            if (!consent.canCapture) return@withLock false
+            for (p in placements) {
+                val event = NativeCrashRecord.toEvent(p.crash, now, ::isoTimestamp)
+                val sessionJson = if (p.session != null) {
+                    Logger.d("Unilitix: native crash ${p.crash.fingerprint} reported against session ${p.session.id.take(8)}")
+                    crashedSessionJson(p.session, p.crash.timestampMs)
+                } else {
+                    Logger.d("Unilitix: native crash ${p.crash.fingerprint}: no stored session matches; reported in the current one")
+                    sessionManager.markCrashed()
+                    buildSessionJson(sessionManager.currentSession)
+                }
+                database.eventDao().insert(
+                    PendingEvent(sessionJson = sessionJson, eventsJson = Json.toJson(listOf(event)))
+                )
+            }
+            true
+        }
+        if (persisted && consent.canUpload && !uploadGate.isPaused) flushScheduler.scheduleFlush()
+    }
+
+    /** The crashed session's record: `crashed`, and its duration ending at the crash. */
+    private fun crashedSessionJson(entry: SessionHistory.Entry, crashedAt: Long?): String {
+        val base = entry.sessionJson
+            ?: buildSessionJson(Session(id = entry.id, startedAt = entry.startedAt))
+        return try {
+            val obj = org.json.JSONObject(base)
+            val endedAt = SessionHistory.endedAt(entry, crashedAt)
+            obj.put("crashed", true)
+            obj.put("endedAt", isoTimestamp(endedAt))
+            obj.put("durationMs", (endedAt - entry.startedAt).coerceAtLeast(0L))
+            obj.toString()
+        } catch (e: Exception) {
+            base
+        }
+    }
+
+    @androidx.annotation.RequiresApi(30)
+    private fun readProcessExits(): List<ProcessExit> {
+        return try {
+            val am = application.getSystemService(android.app.ActivityManager::class.java) ?: return emptyList()
+            am.getHistoricalProcessExitReasons(application.packageName, 0, ProcessExits.MAX_QUERIED).map { info ->
+                ProcessExit(
+                    reason = info.reason,
+                    timestampMs = info.timestamp,
+                    pid = info.pid,
+                    description = info.description,
+                    readTrace = {
+                        // Native crashes carry the tombstone (protobuf) from API 31.
+                        if (info.reason == ProcessExits.REASON_CRASH_NATIVE) {
+                            info.traceInputStream?.use { readPrefix(it, MAX_TRACE_BYTES) }
+                        } else null
+                    }
+                )
+            }
+        } catch (e: Exception) {
+            Logger.w("Unilitix: could not read process exit reasons: ${e.message}")
+            emptyList()
+        }
+    }
+
+    private fun readPrefix(input: java.io.InputStream, max: Int): ByteArray {
+        val out = java.io.ByteArrayOutputStream()
+        val buf = ByteArray(8 * 1024)
+        while (out.size() < max) {
+            val n = input.read(buf, 0, minOf(buf.size, max - out.size()))
+            if (n < 0) break
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
+    }
+
     /** See [Unilitix.recordException]. */
     internal fun recordException(
         type: String,
@@ -527,7 +668,10 @@ internal class UnilitixInternal(
             // Same error reported maxReportsPerFingerprint times this session
             // (or the session's error budget is spent): counted, not sent.
             Logger.d("Unilitix: repeat ${if (fatal) "CRASH" else "EXCEPTION"} $fingerprint suppressed (per-session cap)")
-            if (fatal) sessionManager.markCrashed()
+            if (fatal) {
+                sessionManager.markCrashed()
+                NativeSignalHandler.markExceptionHandled()
+            }
             return
         }
         val title = "$type: $message".take(200)
@@ -550,6 +694,8 @@ internal class UnilitixInternal(
             return
         }
         sessionManager.markCrashed()
+        // A SIGABRT that follows (the bridge aborting) is this crash, not a new one.
+        NativeSignalHandler.markExceptionHandled()
         // The caller is about to hand the error to a handler that kills the
         // process: get the report into the on-device queue first, bounded so
         // a stuck disk cannot hold the crash open.
@@ -580,6 +726,10 @@ internal class UnilitixInternal(
     }
 
     internal suspend fun flushNow(session: Session? = null) {
+        // Native crashes of earlier processes are queued first (bounded wait).
+        if (!nativeCrashesQueued.isCompleted) {
+            withTimeoutOrNull(NATIVE_CRASH_WAIT_MS) { nativeCrashesQueued.await() }
+        }
         val events = eventBuffer.drain()
         if (!consent.canCapture) return // denied: drop whatever was buffered
         if (events.isEmpty() && session == null) return
@@ -607,6 +757,7 @@ internal class UnilitixInternal(
                     networkAtCapture = batchNetwork
                 )
             )
+            sessionHistory.recordBatch(activeSession.id, activeSession.startedAt, sessionJson, System.currentTimeMillis())
             true
         }
         if (!persisted) return
@@ -640,6 +791,8 @@ internal class UnilitixInternal(
                     database.eventDao().deleteAll()
                     database.screenshotDao().deleteAll()
                     File(application.cacheDir, "unilitix_crash_pending.json").delete()
+                    nativeCrashFile.delete()
+                    sessionHistory.clear()
                     Logger.d("Unilitix: consent denied — on-device queue purged")
                 } catch (e: Exception) {
                     Logger.w("Unilitix: failed to purge on-device queue: ${e.message}")
@@ -653,6 +806,13 @@ internal class UnilitixInternal(
             flushNow()
             if (!uploadGate.isPaused) flushScheduler.scheduleFlush()
         }
+    }
+
+    private companion object {
+        /** Cap on reading a native crash's tombstone (signal_info is near the start). */
+        const val MAX_TRACE_BYTES = 256 * 1024
+        /** How long a flush waits for earlier native crashes to be queued. */
+        const val NATIVE_CRASH_WAIT_MS = 5_000L
     }
 
     fun shouldSample(): Boolean {

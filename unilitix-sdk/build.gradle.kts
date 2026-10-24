@@ -9,13 +9,28 @@ plugins {
 android {
     namespace = "io.unilitix.sdk"
     compileSdk = 36
+    // Native crash capture (API 21-29) is built from src/main/cpp. The NDK the
+    // published AAR is built with; override locally with
+    // -Punilitix.ndkVersion=<version> (or in ~/.gradle/gradle.properties).
+    ndkVersion = (findProperty("unilitix.ndkVersion") as String?) ?: "27.1.12297006"
 
     defaultConfig {
         minSdk = 21
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.6.1\"")
+        buildConfigField("String", "SDK_VERSION", "\"1.7.0\"")
+
+        ndk {
+            // Every ABI the NDK still supports; apps keep only the ones they ship.
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+        }
     }
 
     buildTypes {
@@ -70,7 +85,7 @@ publishing {
         create<MavenPublication>("release") {
             groupId = "com.unilitix"
             artifactId = "unilitix-android"
-            version = "1.6.1"
+            version = "1.7.0"
 
             afterEvaluate {
                 from(components["release"])
