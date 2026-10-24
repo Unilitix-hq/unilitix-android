@@ -100,9 +100,12 @@ data class UnilitixConfig internal constructor(
          * navigation) with [Unilitix.unmask]. Inputs are always governed by
          * [maskInputs] / [maskInputsInScreenshots], whatever `unmask` says.
          *
-         * Jetpack Compose text is not covered: the SDK does not walk Compose
-         * semantics. Wrap sensitive Compose content in a view annotated
-         * [UnilitixPrivate] or list its host view in [maskedViewIds].
+         * Jetpack Compose is covered through its semantics tree: every
+         * `Text`, text field and node with a content description (other than
+         * images) is masked the same way. Exempt composables with
+         * `Modifier.unilitixUnmask()`, force-mask with
+         * `Modifier.unilitixPrivate()` (package `io.unilitix.sdk.compose`).
+         * A Compose view whose semantics cannot be read is masked whole.
          */
         var maskAllText: Boolean = true
         /**

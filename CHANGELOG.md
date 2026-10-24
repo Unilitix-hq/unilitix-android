@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.8.0
+
+### Added
+- **Jetpack Compose masking in session replay.** `maskAllText`, `maskInputs` /
+  `maskInputsInScreenshots` and `maskImages` now cover Compose. For each
+  `AndroidComposeView` the screenshot and snapshot walks read the unmerged
+  semantics tree (`RootForTest.semanticsOwner`, public Compose UI API, no
+  reflection), on the main thread, capped at 2000 nodes and 64 levels per
+  Compose view. Text fields (`EditableText` / `SetText`) and `Password` nodes
+  are inputs, `Role.Image` nodes images, and `Text` or a `contentDescription`
+  on anything else is text. Screenshots paint over each node's visible
+  (clipped) bounds; snapshots get one node per semantics node, typed from its
+  semantics (`Text`, `TextField`, `Button`, `Image`, `ComposeNode`), with text
+  redacted or `[MASKED]` exactly as for views.
+- `Modifier.unilitixUnmask()` and `Modifier.unilitixPrivate()`
+  (`io.unilitix.sdk.compose`): the Compose versions of `Unilitix.unmask(view)`
+  and `@UnilitixPrivate`, as custom semantics properties.
+- `Unilitix.nativeCrashCaptureActive()`: true when this SDK captures native
+  crashes in the process (initialized with `autoTrackCrashes`; on API 21-29
+  its signal handler installed). The Unilitix Flutter plugin 2.5.0+ reads it
+  and then leaves native crashes to this SDK, so an app that ships both
+  reports each native crash once instead of twice.
+
+### Fail closed
+- If a Compose view's semantics cannot be read (unknown Compose version, an
+  exception) or exceed the caps, the whole Compose view is painted over in
+  screenshots (when `maskAllText`, `maskImages` or `maskInputsInScreenshots`
+  is on) and is a single `masked` node with no text in snapshots. Logged once.
+
+### Notes
+- No new runtime dependency: Compose UI is `compileOnly` (1.6.8) and only
+  touched after it is found at runtime; apps without Compose are unaffected.
+  The consumer R8 rules add `-dontwarn androidx.compose.**` for them.
+- Not found, so not masked: text drawn on a `Canvas` without semantics, or
+  hidden with `clearAndSetSemantics { }`. Use `Modifier.unilitixPrivate()`.
+- The "Compose text is not masked" caveat of 1.6.0 is lifted.
+
 ## 1.7.0
 
 Native (NDK) crash capture, matching UnilitixCore (iOS) 0.5.0: a crash in C/C++

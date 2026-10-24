@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("com.unilitix:unilitix-android:1.7.0")
+implementation("com.unilitix:unilitix-android:1.8.0")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -139,9 +139,45 @@ Show views that carry no personal data (headings, button labels, navigation) wit
 </TextView>
 ```
 
-`unmask` never exempts inputs, `maskedViewIds` or `@UnilitixPrivate` views. Jetpack Compose
-text is not masked by `maskAllText` (the SDK does not walk Compose semantics): put sensitive
-Compose content in a host view listed in `maskedViewIds` or annotated `@UnilitixPrivate`.
+`unmask` never exempts inputs, `maskedViewIds` or `@UnilitixPrivate` views.
+
+#### Jetpack Compose
+
+From 1.8.0 Compose screens are masked by the same options. The SDK reads the semantics
+tree of each `AndroidComposeView` (the tree accessibility services and Compose UI tests
+read), on the main thread, at most 2000 nodes per Compose view:
+
+| Semantics | Treated as |
+|---|---|
+| Text field (`EditableText` / `SetText`), `Password` | Input (`maskInputs`, passwords always) |
+| `Role.Image` (`Image`, `Icon`) | Image (`maskImages`) |
+| `Text`, or a `contentDescription` on anything else | Text (`maskAllText`) |
+
+The SDK has no runtime dependency on Compose: apps without Compose are unaffected and
+there is nothing to add. In Compose code, the equivalents of `unmask` and `@UnilitixPrivate`
+are modifiers:
+
+```kotlin
+import io.unilitix.sdk.compose.unilitixPrivate
+import io.unilitix.sdk.compose.unilitixUnmask
+
+Text("Order summary", Modifier.unilitixUnmask())     // shown, with its subtree
+Column(Modifier.unilitixPrivate()) { CardDetails() } // always masked, whatever else is set
+```
+
+Limits:
+
+- The walk fails closed. If the semantics tree cannot be read (an unexpected Compose
+  version, an error) or has more than 2000 nodes or 64 levels, the whole Compose view is
+  painted over in screenshots (whenever `maskAllText`, `maskImages` or
+  `maskInputsInScreenshots` is on), and in snapshots it is a single `masked` node
+  without text. A warning is logged once.
+- Only content in the semantics tree is found. Text drawn directly on a `Canvas`
+  without a `contentDescription`, or hidden from semantics with
+  `Modifier.clearAndSetSemantics { }`, is not seen and is not masked: mark it
+  with `Modifier.unilitixPrivate()`.
+- Snapshot nodes from Compose carry a type from their semantics (`Text`, `TextField`,
+  `Button`, `Image`, …) and no colours.
 
 Screenshots are change-driven: a frame is taken when the screen redraws and
 `screenshotIntervalMs` has passed, at most `maxScreenshotsPerMinute` (20) in any rolling
@@ -227,6 +263,13 @@ keeps the report on the device, denied drops it.
 Not reported: JVM crashes are already reported by the uncaught-exception handler (never
 twice), ANRs are not reported yet, and on Android 11+ exits from before the first launch
 with 1.7.0 are skipped.
+
+**Apps that also ship the Unilitix Flutter plugin.** From 1.8.0 (with the plugin 2.5.0+),
+a native crash is reported once, by this SDK: the plugin sees
+`Unilitix.nativeCrashCaptureActive()` and installs no signal handler of its own and sends
+none of the system's exit records. Initialize this SDK in `Application.onCreate`, before
+any Flutter engine starts, so the plugin finds it. Sessions and JVM crashes are still
+recorded by both SDKs separately (each keeps its own sessions).
 
 To try it: the sample app's crash screen has a "Trigger Native Crash" button
 (`Process.sendSignal(Process.myPid(), 11)`), or from a shell

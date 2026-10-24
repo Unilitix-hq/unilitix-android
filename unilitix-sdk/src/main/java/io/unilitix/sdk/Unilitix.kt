@@ -198,6 +198,21 @@ object Unilitix {
     val isInitialized: Boolean
         get() = instance != null
 
+    /**
+     * True when this SDK captures native (NDK) crashes in this process: [init]
+     * has run with `autoTrackCrashes` on and, on Android 5.0-10 (API 21-29),
+     * its signal handler is installed (on API 30+ the next launch reads the
+     * system's exit records instead).
+     *
+     * For other Unilitix SDKs in the same app: the Unilitix Flutter plugin
+     * (2.5.0+) checks it, without a compile-time dependency, and leaves native
+     * crashes to this SDK when it is true, so one native crash is reported
+     * once. Consent is not part of it: a denied user is not reported by
+     * either SDK's native capture here.
+     */
+    @JvmStatic
+    fun nativeCrashCaptureActive(): Boolean = instance?.nativeCrashCaptureActive == true
+
     internal const val FATAL_PERSIST_TIMEOUT_MS = 2_000L
 
     @JvmStatic
@@ -353,6 +368,11 @@ internal class UnilitixInternal(
     private var snapshotCapture: SnapshotCapture? = null
     private var screenshotCapture: ScreenshotCapture? = null
 
+    /** See [Unilitix.nativeCrashCaptureActive]; set once in [start]. */
+    @Volatile
+    internal var nativeCrashCaptureActive: Boolean = false
+        private set
+
     internal val sessionManager = SessionManager(
         sessionTimeoutSeconds = config.sessionTimeoutSeconds,
         onSessionStart = { session ->
@@ -442,7 +462,9 @@ internal class UnilitixInternal(
                 admitReport = { fingerprint -> errorLimiter.admit(fingerprint) != null }
             ).install()
             // API 21-29 only; API 30+ reads ApplicationExitInfo instead.
-            NativeSignalHandler.install(nativeCrashFile)
+            val handlerInstalled = NativeSignalHandler.install(nativeCrashFile)
+            nativeCrashCaptureActive = handlerInstalled ||
+                android.os.Build.VERSION.SDK_INT > NativeSignalHandler.LAST_API_LEVEL
         }
 
         recoverPendingCrash()

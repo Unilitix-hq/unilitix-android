@@ -51,6 +51,10 @@ import java.util.concurrent.atomic.AtomicInteger
  *
  * Coordinates: `bounds` and `viewportWidth`/`viewportHeight` are in dp,
  * relative to the window's top-left corner.
+ *
+ * Jetpack Compose: an `AndroidComposeView` has its semantics nodes
+ * ([ComposeSnapshotNode], via [ComposeHost]) as children, before any
+ * Android views it hosts.
  */
 internal class SnapshotCapture(
     private val config: UnilitixConfig,
@@ -157,6 +161,12 @@ internal class SnapshotCapture(
      * views, and nothing is read for skipped or private views.
      */
     private inner class ViewSnapshotNode(private val view: View, private val origin: IntArray) : SnapshotViewNode {
+        // A Jetpack Compose host: its semantics, read at most once per walk.
+        private val compose: ComposeTree? by lazy(LazyThreadSafetyMode.NONE) {
+            if (ComposeHost.isHost(view)) ComposeHost.read(view) else null
+        }
+        /** Compose semantics could not be read: one node, masked like a web view. */
+        override val isUnreadable: Boolean get() = compose?.failed ?: false
         override val typeName: String get() = view.javaClass.simpleName
         override val kind: NodeKind
             get() = when (view) {
@@ -196,8 +206,13 @@ internal class SnapshotCapture(
             get() = view is Button || view.hasOnClickListeners() || view.isClickable
         override val children: List<SnapshotViewNode>
             get() {
-                val group = view as? ViewGroup ?: return emptyList()
-                return List(group.childCount) { ViewSnapshotNode(group.getChildAt(it), origin) }
+                val group = view as? ViewGroup
+                val views: List<SnapshotViewNode> =
+                    if (group == null) emptyList() else List(group.childCount) { ViewSnapshotNode(group.getChildAt(it), origin) }
+                val root = compose?.root ?: return views
+                // Compose nodes are relative to the host's top-left.
+                val f = frame
+                return listOf<SnapshotViewNode>(ComposeSnapshotNode(root, f.left, f.top)) + views
             }
     }
 

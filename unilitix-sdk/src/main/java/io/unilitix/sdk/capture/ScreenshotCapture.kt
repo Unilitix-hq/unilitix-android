@@ -196,8 +196,18 @@ internal class ScreenshotCapture(
         }
     }
 
-    /** Adapts a View to the masking rules in [ReplayMasking]. Main thread only. */
+    /**
+     * Adapts a View to the masking rules in [ReplayMasking]. Main thread only.
+     * A Jetpack Compose host view has its semantics nodes as extra children
+     * ([ComposeMaskNode]); one whose semantics cannot be read in full is
+     * [isUnreadable] and masked whole.
+     */
     private inner class ViewNode(private val view: View, private val rootLoc: IntArray) : MaskableNode {
+        // Read at most once per walk, and only for Compose hosts.
+        private val compose: ComposeTree? by lazy(LazyThreadSafetyMode.NONE) {
+            if (ComposeHost.isHost(view)) ComposeHost.read(view) else null
+        }
+        override val isUnreadable: Boolean get() = compose?.unreadableForScreenshot ?: false
         override val kind: NodeKind
             get() = when {
                 view is EditText -> NodeKind.INPUT
@@ -230,8 +240,15 @@ internal class ScreenshotCapture(
             }
         override val children: List<MaskableNode>
             get() {
-                val group = view as? ViewGroup ?: return emptyList()
-                return List(group.childCount) { ViewNode(group.getChildAt(it), rootLoc) }
+                val group = view as? ViewGroup
+                val views: List<MaskableNode> =
+                    if (group == null) emptyList() else List(group.childCount) { ViewNode(group.getChildAt(it), rootLoc) }
+                val root = compose?.root ?: return views
+                // Compose nodes are relative to the host's top-left; clipped to its visible part.
+                val clip = rect ?: return views
+                val loc = IntArray(2)
+                view.getLocationInWindow(loc)
+                return listOf<MaskableNode>(ComposeMaskNode(root, loc[0] - rootLoc[0], loc[1] - rootLoc[1], clip)) + views
             }
     }
 
