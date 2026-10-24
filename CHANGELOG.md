@@ -1,5 +1,81 @@
 # Changelog
 
+## 1.7.0
+
+Native (NDK) crash capture, matching UnilitixCore (iOS) 0.5.0: a crash in C/C++
+code is reported on the next launch as a fatal `CRASH` against the session that
+was running when the process died. On by default with `autoTrackCrashes`; no app
+changes or configuration.
+
+### Added
+- **Android 11+ (API 30+): no native code.** At init the SDK reads
+  `ActivityManager.getHistoricalProcessExitReasons` and reports exits with
+  `REASON_CRASH_NATIVE` newer than a watermark kept in the SDK's preferences
+  (at most 5 per launch, newest first). The signal comes from the tombstone
+  (API 31+, `Tombstone.signal_info.number`, read with a tiny protobuf reader),
+  else from the exit description, else it is unknown. `REASON_CRASH` (JVM) is
+  never reported here: the uncaught-exception handler already reported it.
+  `REASON_ANR` is selected but not sent (the contract has no ANR type yet).
+  - **First launch with 1.7.0:** the watermark is set to now and nothing is
+    reported, so exits from before the upgrade (already-reported JVM crashes,
+    native crashes of sessions uploaded long ago, possibly before a consent
+    decision) never arrive as a flood of stale crashes. A native crash in that
+    first 1.7.0 process is reported on the launch after it.
+- **Android 5.0–10 (API 21–29): `libunilitix-native.so`.** A C signal handler
+  (SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE, SIGTRAP: the iOS list) on an
+  alternate stack writes one record to `files/unilitix/native_crash.json`
+  using only async-signal-safe calls, then chains to the previous handler
+  (debuggerd, Crashlytics, Sentry, …) or the default action, so the process
+  dies as before. Not installed on API 30+. If the library fails to load, the
+  SDK logs a warning and carries on without it.
+- **Same record and event as every Unilitix SDK.** The file holds
+  `{"platform":"android","exceptionType":"SIGNAL","signal":11,"timestamp":<ms>}`
+  (UnilitixCore `CrashFile` format). The event: `exceptionType` `SIGNAL`,
+  `exceptionMessage` `Fatal signal 11 (SIGSEGV)`, `title`
+  `SIGNAL: Fatal signal 11 (SIGSEGV)`, `fatal`, timestamp = time of death,
+  `metadata` `{fingerprint, platform: "android", signal}`. Fingerprint key
+  `SIGNAL:<n>` (`SIGNAL:11` = `8f1fc15bfa06be00`, as on iOS and Flutter); an
+  unknown signal is keyed `SIGNAL` with no `metadata.signal`.
+- **Attribution.** The SDK keeps the last 8 sessions' records on the device.
+  The crash goes to the stored session with the latest start at or before the
+  crash time + 1 s; that session is re-sent marked `crashed`, with
+  `endedAt`/`durationMs` ending at the crash. No match: the current session,
+  which is then marked crashed. Reports are queued before the new session's
+  first batch.
+- **No double reports.** The JVM crash handler (and fatal
+  `recordException`) tells the native handler the exception is handled, so a
+  SIGABRT that follows it is not recorded again. The record file is read and
+  deleted at init, before this process's handler is installed: exactly once.
+- **Consent.** Pending keeps native reports on the device like other events;
+  denied drops them (the file is deleted and the watermark advanced, so they
+  are never sent later) and also clears the stored session records.
+- Sample app: "Trigger Native Crash (SIGSEGV)" on the crash screen.
+
+### Size
+- The AAR now contains `jni/{armeabi-v7a,arm64-v8a,x86,x86_64}/libunilitix-native.so`,
+  plain C (no libc++, no liblog), `-Os`, hidden visibility, stripped: about
+  6–10 KB per ABI uncompressed, roughly 15–25 KB added to the AAR. An app
+  shipped as an App Bundle or with ABI splits gets one ABI, so about 10 KB per
+  install. Linked with 16 KB max page size (Android 15+ devices, Play
+  requirement).
+
+### Build
+- The SDK module now builds native code: NDK `27.1.12297006` (override with
+  `-Punilitix.ndkVersion=<version>`), CMake 3.22.1 (AGP default). The publish
+  workflow installs both with `sdkmanager` and fails if any ABI's `.so` is
+  missing from the release AAR. Apps using the published AAR need no NDK.
+- `consumer-rules.pro` keeps the JNI methods of
+  `io.unilitix.sdk.capture.NativeSignalHandler` (bound by name).
+
+### How to test
+- Sample app: crash screen → "Trigger Native Crash (SIGSEGV)", relaunch.
+- Any debuggable app: `adb shell run-as <package> kill -SEGV $(adb shell pidof <package>)`,
+  relaunch. Or a JNI null dereference in your own native code.
+- Expect one `CRASH` `SIGNAL: Fatal signal 11 (SIGSEGV)` with fingerprint
+  `8f1fc15bfa06be00` on the session that was running. With
+  `debugLogging = true`, logcat (tag `Unilitix`) shows
+  `native crash … reported against session …`.
+
 ## 1.6.1
 
 View-tree snapshots now match UnilitixCore (iOS) 0.4.0 and common

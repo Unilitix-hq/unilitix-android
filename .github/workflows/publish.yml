@@ -18,6 +18,16 @@ jobs:
         with:
           gradle-version: '8.2'
 
+      # The AAR ships libunilitix-native.so (native crash capture, API 21-29).
+      # Install the exact NDK build.gradle.kts pins (ndkVersion) and the CMake
+      # AGP uses by default, instead of relying on what the runner image has.
+      - name: Install NDK and CMake
+        run: |
+          NDK=$(grep -E '^\s*ndkVersion = ' unilitix-sdk/build.gradle.kts | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          test -n "$NDK" || { echo "ndkVersion not found in unilitix-sdk/build.gradle.kts"; exit 1; }
+          echo "NDK $NDK"
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK" "cmake;3.22.1" > /dev/null
+
       - name: Tag matches the library version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
@@ -26,6 +36,13 @@ jobs:
 
       - name: Unit tests and release build
         run: ./gradlew :unilitix-sdk:testDebugUnitTest :unilitix-sdk:assembleRelease
+
+      - name: AAR contains the native library for every ABI
+        run: |
+          AAR=unilitix-sdk/build/outputs/aar/unilitix-sdk-release.aar
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            unzip -l "$AAR" | grep -q "jni/$abi/libunilitix-native.so" || { echo "missing $abi .so in $AAR"; exit 1; }
+          done
 
       - name: Publish to Maven Central
         run: ./gradlew publishToSonatype closeAndReleaseSonatypeStagingRepository

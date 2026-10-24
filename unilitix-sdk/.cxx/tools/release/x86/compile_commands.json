@@ -1,0 +1,7 @@
+[
+{
+  "directory": "/Users/oluwatosinayodele/Downloads/tazama-android/unilitix-sdk/.cxx/RelWithDebInfo/jp447253/x86",
+  "command": "/Users/oluwatosinayodele/Library/Android/sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/darwin-x86_64/bin/clang --target=i686-none-linux-android21 --sysroot=/Users/oluwatosinayodele/Library/Android/sdk/ndk/27.1.12297006/toolchains/llvm/prebuilt/darwin-x86_64/sysroot -Dunilitix_native_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -mstackrealign -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -O2 -g -DNDEBUG -fPIC -Os -fvisibility=hidden -ffunction-sections -fdata-sections -Wall -Wextra -o CMakeFiles/unilitix-native.dir/unilitix_native.c.o -c /Users/oluwatosinayodele/Downloads/tazama-android/unilitix-sdk/src/main/cpp/unilitix_native.c",
+  "file": "/Users/oluwatosinayodele/Downloads/tazama-android/unilitix-sdk/src/main/cpp/unilitix_native.c"
+}
+]

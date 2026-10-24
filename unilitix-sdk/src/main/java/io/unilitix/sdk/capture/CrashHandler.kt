@@ -32,7 +32,13 @@ internal class CrashHandler(
      * `maxErrorReportsPerSession`): false when this fingerprint was already
      * reported often enough this session. The crash is still passed on.
      */
-    private val admitReport: (fingerprint: String) -> Boolean = { true }
+    private val admitReport: (fingerprint: String) -> Boolean = { true },
+    /**
+     * Tells the native signal handler (API 21-29) that this exception is
+     * dealt with, so a SIGABRT that follows it is not reported a second
+     * time as a native crash.
+     */
+    private val markNativeHandled: () -> Unit = { NativeSignalHandler.markExceptionHandled() }
 ) : Thread.UncaughtExceptionHandler {
 
     private val originalHandler = Thread.getDefaultUncaughtExceptionHandler()
@@ -50,6 +56,9 @@ internal class CrashHandler(
 
     override fun uncaughtException(thread: Thread, throwable: Throwable) {
         try {
+            // First, even when nothing is recorded (consent denied): this
+            // exception is the crash, not the signal that may follow it.
+            try { markNativeHandled() } catch (e: Throwable) { /* already crashing */ }
             if (!isEnabled()) return // finally still hands the crash to the original handler
             onCrash()
 

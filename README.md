@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("com.unilitix:unilitix-android:1.6.1")
+implementation("com.unilitix:unilitix-android:1.7.0")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -59,7 +59,7 @@ Unilitix.trackScreen("CheckoutScreen")
 | Screen views | Every Activity and Fragment resume |
 | Taps | x/y in dp (logical px) from the window's top-left corner, view class/id |
 | Rage taps | 3+ taps in 1 second within 100 dp of each other on one screen |
-| Crashes | Stack trace + last 10 breadcrumbs |
+| Crashes | JVM: stack trace + last 10 breadcrumbs. Native (NDK/C/C++) crashes: the fatal signal, reported on the next launch |
 | Network type | 2G / 3G / 4G / 5G / WiFi |
 | Device info | Manufacturer, model, OS version |
 | Performance | Memory usage, CPU%, frame drops |
@@ -206,6 +206,33 @@ Unilitix.isInitialized                                      // true once init() 
 
 Crash and exception reports carry a stable `metadata.fingerprint` (exception type + top three frames, line numbers ignored), `title` and `fatal`, so the dashboard counts one bug once across devices. JVM uncaught exceptions are reported as fatal.
 
+## Native (NDK) crashes
+
+From 1.7.0 the SDK also reports crashes in native code (your C/C++ libraries, or
+third-party `.so` files), with `autoTrackCrashes` on (the default). Nothing to configure:
+the AAR ships a small native library and the consumer ProGuard/R8 rules it needs.
+
+| Android | How |
+|---|---|
+| 11+ (API 30+) | No native code runs. On the next launch the SDK reads the system's record of how earlier processes ended (`ApplicationExitInfo`, `REASON_CRASH_NATIVE` only) and the signal from the tombstone (API 31+) or the exit description. |
+| 5.0–10 (API 21–29) | `libunilitix-native.so` installs handlers for SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE and SIGTRAP. The handler writes one small record to `files/unilitix/native_crash.json` (async-signal-safe) and hands the signal to the previous handler (the system's crash reporter, Crashlytics, Sentry, …), so the process dies exactly as before. |
+
+The crash is reported on the next launch as a fatal `CRASH` against the session that was
+running when the process died (that session is marked crashed), with the same shape as
+the iOS SDK: `exceptionType` `SIGNAL`, message `Fatal signal 11 (SIGSEGV)`, `metadata.signal`,
+`metadata.platform` `android`, and fingerprint `SIGNAL:<n>` (one group per signal). Native
+reports carry no native stack trace. Consent applies as for every other event: pending
+keeps the report on the device, denied drops it.
+
+Not reported: JVM crashes are already reported by the uncaught-exception handler (never
+twice), ANRs are not reported yet, and on Android 11+ exits from before the first launch
+with 1.7.0 are skipped.
+
+To try it: the sample app's crash screen has a "Trigger Native Crash" button
+(`Process.sendSignal(Process.myPid(), 11)`), or from a shell
+`adb shell run-as <your.package> kill -SEGV <pid>` (`adb shell pidof <your.package>`).
+Relaunch the app and the crash appears with the next upload.
+
 ## Debug logging
 
 `debugLogging` is off by default. Turn it on to see what the SDK does in logcat (tag
@@ -227,6 +254,8 @@ Events captured while offline are persisted in a local Room database and automat
 ## Requirements
 
 - Min SDK: 21 (Android 5.0 — covers ~99% of African Android devices)
+- Building the SDK from source needs the Android NDK (27.1.12297006; override with
+  `-Punilitix.ndkVersion=<version>`) and CMake 3.22.1. Apps that use the published AAR need neither.
 - Target SDK: 34
 - Kotlin 1.9+
 
@@ -236,6 +265,6 @@ The `sample-app/` module contains a full demo with:
 - `MainActivity` — login, custom events, flush, crash navigation
 - `ProductActivity` — add to cart, checkout navigation
 - `CheckoutActivity` — auto-masked card form, purchase tracking
-- `CrashActivity` — triggers a NullPointerException to test crash capture
+- `CrashActivity` — triggers a NullPointerException, or a native SIGSEGV, to test crash capture
 
 For emulator testing, `App.kt` points to `http://10.0.2.2:4000` (your Mac's localhost). For physical device testing, replace with your Mac's LAN IP.

@@ -8,6 +8,12 @@
     @io.unilitix.sdk.UnilitixPrivate *;
 }
 
+# Native crash capture (API 21-29): libunilitix-native.so binds these JNI
+# methods by class and method name.
+-keep class io.unilitix.sdk.capture.NativeSignalHandler {
+    native <methods>;
+}
+
 # Keep enums
 -keepclassmembers enum io.unilitix.sdk.** { *; }
 
