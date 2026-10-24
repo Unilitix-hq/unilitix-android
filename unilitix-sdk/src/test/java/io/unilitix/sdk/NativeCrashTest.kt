@@ -461,4 +461,22 @@ class NativeCrashTest {
         // The real JNI path is skipped too (no UnsatisfiedLinkError).
         NativeSignalHandler.markExceptionHandled()
     }
+
+    // ── coordination with the Flutter plugin (1.8.0) ─────────────────────
+
+    @Test
+    fun `native crash capture is not active before init`() {
+        assertFalse(Unilitix.isInitialized)
+        assertFalse(Unilitix.nativeCrashCaptureActive())
+    }
+
+    @Test
+    fun `nativeCrashCaptureActive is a public static method the plugin can find by name`() {
+        // The Flutter plugin looks it up with reflection (no compile-time
+        // dependency): class name, method name, no parameters, static, boolean.
+        val m = Class.forName("io.unilitix.sdk.Unilitix").getMethod("nativeCrashCaptureActive")
+        assertTrue(java.lang.reflect.Modifier.isStatic(m.modifiers))
+        assertEquals(java.lang.Boolean.TYPE, m.returnType)
+        assertEquals(false, m.invoke(null))
+    }
 }

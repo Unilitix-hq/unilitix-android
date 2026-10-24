@@ -17,6 +17,17 @@
 # Keep enums
 -keepclassmembers enum io.unilitix.sdk.** { *; }
 
+# Jetpack Compose is compileOnly: an app without Compose must still shrink.
+# (The Compose walk catches the NoClassDefFoundError at runtime.)
+-dontwarn androidx.compose.**
+
+# Unilitix.nativeCrashCaptureActive() is looked up by name by the Unilitix
+# Flutter plugin (2.5.0+); kept by the Unilitix rule above, restated so it is
+# not lost if that rule is narrowed.
+-keep class io.unilitix.sdk.Unilitix {
+    public static boolean nativeCrashCaptureActive();
+}
+
 # OkHttp
 -dontwarn okhttp3.**
 -dontwarn okio.**

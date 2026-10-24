@@ -19,7 +19,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.7.0\"")
+        buildConfigField("String", "SDK_VERSION", "\"1.8.0\"")
 
         ndk {
             // Every ABI the NDK still supports; apps keep only the ones they ship.
@@ -74,6 +74,14 @@ dependencies {
     implementation(libs.startup.runtime)
     implementation(libs.security.crypto)
 
+    // Jetpack Compose masking in session replay. compileOnly: never added to
+    // the app; the SDK only touches Compose after finding it at runtime
+    // (capture/ComposeHost.kt). No Compose compiler: the SDK declares no
+    // @Composable code, only plain Modifier extensions. 1.6.8 is old enough
+    // for Kotlin 1.9 to read and newer than every API used (all Compose UI
+    // 1.0+); apps run it against their own Compose version.
+    compileOnly(libs.compose.ui)
+
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
@@ -85,7 +93,7 @@ publishing {
         create<MavenPublication>("release") {
             groupId = "com.unilitix"
             artifactId = "unilitix-android"
-            version = "1.7.0"
+            version = "1.8.0"
 
             afterEvaluate {
                 from(components["release"])

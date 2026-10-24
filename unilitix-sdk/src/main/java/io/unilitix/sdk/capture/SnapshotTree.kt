@@ -114,7 +114,10 @@ internal interface SnapshotViewNode : MaskableNode {
  * - `@UnilitixPrivate` views and views in `maskedViewIds` become a node with
  *   `type`, `bounds` and `masked: true` only: no text, no children.
  * - Web views are leaves, `masked` when `maskAllText` or `maskInputs` is on
- *   (unless inside an unmasked subtree).
+ *   (unless inside an unmasked subtree). So is a Compose view whose
+ *   semantics could not be read ([MaskableNode.isUnreadable]).
+ * - Jetpack Compose views have their semantics nodes as children
+ *   ([ComposeSnapshotNode]), masked like views.
  * - At most [MAX_NODES] nodes and [MAX_DEPTH] levels below the root, so a
  *   huge or deeply nested screen cannot stall the main thread. Past the cap
  *   nodes are simply left out; nothing marks the truncation (as on iOS).
@@ -174,7 +177,9 @@ internal object SnapshotBuilder {
             hidden = true
         } else {
             when {
-                view.isWebView -> {
+                // A Compose view whose semantics could not be read is treated
+                // like a web view: none of its text is known, so none is sent.
+                view.isWebView || view.isUnreadable -> {
                     if (ReplayMasking.maskSnapshotWebView(unmasked, policy)) masked = true
                     descend = false
                 }

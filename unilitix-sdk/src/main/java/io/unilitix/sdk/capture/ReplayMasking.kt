@@ -33,6 +33,12 @@ internal interface MaskableNode {
     /** The part of the view visible on screen, relative to the root; null when none of it is. */
     val rect: MaskRect?
     val children: List<MaskableNode>
+    /**
+     * The view draws content the walk cannot see into: a Jetpack Compose view
+     * whose semantics could not be read in full. Masked whole (fail closed),
+     * see [ReplayMasking.maskUnreadableInScreenshot].
+     */
+    val isUnreadable: Boolean get() = false
 }
 
 internal data class MaskPolicy(
@@ -58,6 +64,10 @@ internal data class MaskedText(val text: String, val redacted: Boolean)
  * - `maskImages` (default off): every ImageView and bitmap background.
  * - Snapshots only: a WebView is one masked node with `maskAllText` or
  *   `maskInputs` (screenshots do not classify web views).
+ * - Jetpack Compose: each node of the semantics tree is classified like a
+ *   view (text field = input, `Role.Image` = image, text or content
+ *   description = text). A Compose view whose semantics cannot be read in
+ *   full is masked whole in screenshots and is one masked node in snapshots.
  * - `Unilitix.unmask(view)` exempts that view and its subtree from the two
  *   options above.
  */
@@ -80,9 +90,23 @@ internal object ReplayMasking {
             return // the rect covers every child
         }
         val exempt = unmasked || node.isUnmasked
+        if (node.isUnreadable && maskUnreadableInScreenshot(policy, exempt)) {
+            node.rect?.let { out.add(it) }
+            return // the rect covers every child
+        }
         if (shouldMaskInScreenshot(node, policy, exempt)) node.rect?.let { out.add(it) }
         for (child in node.children) collect(child, policy, exempt, out)
     }
+
+    /**
+     * True when a view whose content cannot be read ([MaskableNode.isUnreadable])
+     * is painted over whole: whenever anything it may contain would be masked.
+     * Inputs (passwords at least) are masked in screenshots whenever
+     * `maskInputsInScreenshots` is on, and `unmask` never exempts inputs, so
+     * that alone masks it; text and images follow their options.
+     */
+    fun maskUnreadableInScreenshot(policy: MaskPolicy, unmasked: Boolean): Boolean =
+        policy.maskInputsInScreenshots || ((policy.maskAllText || policy.maskImages) && !unmasked)
 
     /** [unmasked] is true when the node or an ancestor was passed to `Unilitix.unmask`. */
     fun shouldMaskInScreenshot(node: MaskableNode, policy: MaskPolicy, unmasked: Boolean): Boolean {
