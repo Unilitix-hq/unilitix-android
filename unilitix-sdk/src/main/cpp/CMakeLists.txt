@@ -5,7 +5,10 @@ project(unilitix_native LANGUAGES C)
 
 add_library(unilitix-native SHARED unilitix_native.c)
 
-# Plain C, no libc++ and no liblog: the library is a few KB per ABI.
+# Plain C, no libc++ and no liblog: the library is a few KB per ABI. From
+# 1.10.0 it also captures the crashed thread's backtrace with the
+# toolchain's _Unwind_Backtrace (libunwind, linked statically and hidden by
+# --exclude-libs).
 target_compile_options(unilitix-native PRIVATE
     -Os
     -fvisibility=hidden

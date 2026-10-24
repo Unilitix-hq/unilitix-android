@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("com.unilitix:unilitix-android:1.9.0")
+implementation("com.unilitix:unilitix-android:1.10.0")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -59,7 +59,7 @@ Unilitix.trackScreen("CheckoutScreen")
 | Screen views | Every Activity and Fragment resume |
 | Taps | x/y in dp (logical px) from the window's top-left corner, view class/id |
 | Rage taps | 3+ taps in 1 second within 100 dp of each other on one screen |
-| Crashes | JVM: stack trace + last 10 breadcrumbs. Native (NDK/C/C++) crashes: the fatal signal, reported on the next launch |
+| Crashes | JVM: stack trace + last 10 breadcrumbs. Native (NDK/C/C++) crashes: the fatal signal and (1.10.0) the crashed thread's backtrace, reported on the next launch |
 | ANRs (Android 11+) | "App isn't responding" kills: the main thread's stack from the system's ANR dump, reported on the next launch as an ANR (not a crash) |
 | Network type | 2G / 3G / 4G / 5G / WiFi |
 | Device info | Manufacturer, model, OS version |
@@ -251,15 +251,56 @@ the AAR ships a small native library and the consumer ProGuard/R8 rules it needs
 
 | Android | How |
 |---|---|
-| 11+ (API 30+) | No native code runs. On the next launch the SDK reads the system's record of how earlier processes ended (`ApplicationExitInfo`, `REASON_CRASH_NATIVE` only) and the signal from the tombstone (API 31+) or the exit description. |
-| 5.0–10 (API 21–29) | `libunilitix-native.so` installs handlers for SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE and SIGTRAP. The handler writes one small record to `files/unilitix/native_crash.json` (async-signal-safe) and hands the signal to the previous handler (the system's crash reporter, Crashlytics, Sentry, …), so the process dies exactly as before. |
+| 11+ (API 30+) | No native code runs. On the next launch the SDK reads the system's record of how earlier processes ended (`ApplicationExitInfo`, `REASON_CRASH_NATIVE` only) and the signal and crashed thread's backtrace from the tombstone (API 31+), or the signal from the exit description (API 30). |
+| 5.0–10 (API 21–29) | `libunilitix-native.so` installs handlers for SIGSEGV, SIGABRT, SIGBUS, SIGILL, SIGFPE and SIGTRAP. The handler writes a record to `files/unilitix/native_crash.json` (first the signal, then, from 1.10.0, the signal plus the crashed thread's backtrace, unwound in the handler; see below) and hands the signal to the previous handler (the system's crash reporter, Crashlytics, Sentry, …), so the process dies exactly as before. |
 
 The crash is reported on the next launch as a fatal `CRASH` against the session that was
 running when the process died (that session is marked crashed), with the same shape as
 the iOS SDK: `exceptionType` `SIGNAL`, message `Fatal signal 11 (SIGSEGV)`, `metadata.signal`,
-`metadata.platform` `android`, and fingerprint `SIGNAL:<n>` (one group per signal). Native
-reports carry no native stack trace. Consent applies as for every other event: pending
-keeps the report on the device, denied drops it.
+`metadata.platform` `android`, and fingerprint `SIGNAL:<n>` (one group per signal). Consent
+applies as for every other event: pending keeps the report on the device, denied drops it.
+
+**Native stack traces (1.10.0).** `stackTrace` is the crashed thread's backtrace (up to 64
+frames) in Android's tombstone format, with each library's GNU build id:
+
+```
+#00 pc 000000000001a2b4  /data/app/~~Xy==/com.shop-Ab==/lib/arm64/libshop.so (BuildId: 9f2c…)
+#01 pc 0000000000356f20  /apex/com.android.art/lib64/libart.so (art_quick_generic_jni_trampoline+144) (BuildId: 5e6f…)
+```
+
+Release libraries are stripped, so upload the unstripped ones and the dashboard shows
+function, file and line for your frames (OS frames stay as printed). After
+`assembleRelease`/`bundleRelease`, with the `unilitix-cli` uploader from the API repo
+(`cmd/unilitix-cli`, see its `docs/symbolication.md`), in `app/build.gradle.kts`:
+
+```kotlin
+val uploadUnilitixNativeSymbols by tasks.registering(Exec::class) {
+    val libs = layout.buildDirectory.dir("intermediates/merged_native_libs/release/out/lib")
+    onlyIf { libs.get().asFile.exists() && System.getenv("UNILITIX_API_KEY") != null }
+    commandLine(
+        "unilitix-cli", "upload-symbols", "--type", "ndk",
+        "--app-version", android.defaultConfig.versionName!!,
+        "--build", android.defaultConfig.versionCode.toString(),
+        "--path", libs.get().asFile.path,
+    )
+}
+afterEvaluate {
+    tasks.named("mergeReleaseNativeLibs") { finalizedBy(uploadUnilitixNativeSymbols) }
+}
+```
+
+Or by hand: `unilitix-cli upload-symbols --type ndk --path app/build/intermediates/merged_native_libs/release/out/lib`.
+Crashes are matched by build id, so the version flags only label the upload. Build release
+libraries with `-g` for file and line numbers. Grouping is unchanged: the fingerprint stays
+`SIGNAL:<n>` and never includes the frames.
+
+On Android 5–10 the handler unwinds with the toolchain's `_Unwind_Backtrace` and maps each
+frame to its library via `/proc/self/maps` and the library's in-memory ELF headers, using
+only static buffers. Unwinding is not strictly async-signal-safe, so it is fenced: the
+signal-only record is written first, a memory fault while capturing is caught and abandons
+the capture, and the record with the backtrace replaces the first one atomically (write to
+`native_crash.json.tmp`, then `rename`). Whatever goes wrong, the report degrades to the
+1.9.0 signal-only record, and the signal still reaches the previous handler.
 
 Not reported: JVM crashes are already reported by the uncaught-exception handler (never
 twice), and on Android 11+ exits from before the first launch with 1.7.0 are skipped.
