@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.9.0
+
+### Added
+- **ANR reporting (Android 11+).** `REASON_ANR` exits found by the existing
+  `ApplicationExitInfo` scan (same watermark as native crashes, so each is
+  reported once) are sent on the next launch as `ANR` events (SDK contract
+  1.3.0): `exceptionType` `ANR`, the system's description as the message, the
+  main thread's block of the ANR thread dump as `stackTrace` (pure-Kotlin
+  parser, `|` property lines dropped, capped at 16 KB), and `metadata` with
+  the contract fingerprint (type `ANR` over the main thread, so ANRs group by
+  where the main thread was stuck), `platform`, `importance` and `foreground`.
+  At most 5 per launch (newest kept); the dump is read only for those.
+- The ANR goes to the session that was running (via the session history, as
+  for native crashes); that session ends when the process was killed but is
+  **not** marked crashed: an ANR is its own issue type, so crash-free rates
+  keep their meaning. Pending consent holds the report, denied drops it;
+  `autoTrackCrashes = false` turns it off.
+- Sample app: "Trigger ANR" on the crash screen.
+
+### Notes
+- Not reported: ANRs on Android 10 and older (no exit record), and ANRs the
+  app recovered from ("Wait"); there is no in-process watchdog thread.
+- Needs the API with contract 1.3.0 (ANR event type); an older API drops
+  unknown event types.
+- Contract constants (`SdkContract.kt`) updated to 1.3.0, including the ANR
+  fingerprint vectors.
+
 ## 1.8.0
 
 ### Added

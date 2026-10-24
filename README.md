@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("com.unilitix:unilitix-android:1.8.0")
+implementation("com.unilitix:unilitix-android:1.9.0")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -60,6 +60,7 @@ Unilitix.trackScreen("CheckoutScreen")
 | Taps | x/y in dp (logical px) from the window's top-left corner, view class/id |
 | Rage taps | 3+ taps in 1 second within 100 dp of each other on one screen |
 | Crashes | JVM: stack trace + last 10 breadcrumbs. Native (NDK/C/C++) crashes: the fatal signal, reported on the next launch |
+| ANRs (Android 11+) | "App isn't responding" kills: the main thread's stack from the system's ANR dump, reported on the next launch as an ANR (not a crash) |
 | Network type | 2G / 3G / 4G / 5G / WiFi |
 | Device info | Manufacturer, model, OS version |
 | Performance | Memory usage, CPU%, frame drops |
@@ -261,8 +262,8 @@ reports carry no native stack trace. Consent applies as for every other event: p
 keeps the report on the device, denied drops it.
 
 Not reported: JVM crashes are already reported by the uncaught-exception handler (never
-twice), ANRs are not reported yet, and on Android 11+ exits from before the first launch
-with 1.7.0 are skipped.
+twice), and on Android 11+ exits from before the first launch with 1.7.0 are skipped.
+ANRs are reported separately (below).
 
 **Apps that also ship the Unilitix Flutter plugin.** From 1.8.0 (with the plugin 2.5.0+),
 a native crash is reported once, by this SDK: the plugin sees
@@ -275,6 +276,43 @@ To try it: the sample app's crash screen has a "Trigger Native Crash" button
 (`Process.sendSignal(Process.myPid(), 11)`), or from a shell
 `adb shell run-as <your.package> kill -SEGV <pid>` (`adb shell pidof <your.package>`).
 Relaunch the app and the crash appears with the next upload.
+
+## ANRs (app not responding)
+
+From 1.9.0, on Android 11+ (API 30+), with `autoTrackCrashes` on (the default), the SDK
+reports ANRs: the main thread did not handle input for 5 s, the system showed "*App* isn't
+responding", and the process was killed (the user chose "Close app", or the system killed
+it in the background). On the next launch the SDK reads the system's record of that exit
+(`ApplicationExitInfo`, `REASON_ANR`, the same scan and watermark as native crashes, so
+each ANR is reported once) and its thread dump (`getTraceInputStream()`), and sends an
+`ANR` event:
+
+- `exceptionType` `ANR`, `exceptionMessage` the system's description
+  (`Input dispatching timed out (...)`);
+- `stackTrace`: the main thread's block of the dump (thread header, managed and native
+  frames, lock lines; the `|` property lines dropped), capped at 16 KB;
+- `metadata.fingerprint`: the contract fingerprint of type `ANR` over that stack, so ANRs
+  group by where the main thread was stuck; `metadata.importance` and
+  `metadata.foreground` (the app was in front of the user).
+
+An ANR is not a crash: it goes to the session that was running (which ends when the
+process was killed) but does **not** mark it crashed, so crash-free rates do not change.
+The dashboard lists ANRs as their own issue type ("Not responding"). With R8, upload the
+mapping file and ANR stacks are deobfuscated like crash stacks. At most 5 ANRs are
+reported per launch (the newest). Consent applies as for every other event: pending keeps
+the report on the device, denied drops it.
+
+Limitations:
+- Android 10 and older (API < 30) have no exit record: ANRs there are not reported. There
+  is no in-process watchdog thread (as Sentry has), so an ANR the app recovers from (the
+  user chose "Wait") is not reported on any version.
+- The dump is the system's: if it was not written or cannot be read, the ANR is still
+  reported, with an empty stack (all such ANRs share one issue).
+- No breadcrumbs: the report is built from the system record on the next launch.
+
+To try it: the sample app's crash screen has a "Trigger ANR" button (blocks the main
+thread for 30 s). Tap the screen again, choose "Close app" when the dialog appears, and
+relaunch the app.
 
 ## Debug logging
 

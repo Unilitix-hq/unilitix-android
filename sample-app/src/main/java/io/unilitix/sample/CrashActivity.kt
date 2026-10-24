@@ -43,5 +43,16 @@ class CrashActivity : AppCompatActivity() {
                 Process.sendSignal(Process.myPid(), 11)
             }, 500)
         }
+
+        // ANR (1.9.0, Android 11+): block the main thread, then tap the
+        // screen again; after ~5 s the system shows "isn't responding".
+        // Choose "Close app": the ANR is reported on the next launch.
+        binding.btnTriggerAnr.setOnClickListener {
+            Unilitix.flush()
+            Toast.makeText(this, "Freezing the main thread: tap again, then Close app", Toast.LENGTH_LONG).show()
+            Handler(Looper.getMainLooper()).postDelayed({
+                Thread.sleep(30_000)
+            }, 500)
+        }
     }
 }

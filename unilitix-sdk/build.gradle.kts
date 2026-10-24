@@ -19,7 +19,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.8.0\"")
+        buildConfigField("String", "SDK_VERSION", "\"1.9.0\"")
 
         ndk {
             // Every ABI the NDK still supports; apps keep only the ones they ship.
@@ -93,7 +93,7 @@ publishing {
         create<MavenPublication>("release") {
             groupId = "com.unilitix"
             artifactId = "unilitix-android"
-            version = "1.8.0"
+            version = "1.9.0"
 
             afterEvaluate {
                 from(components["release"])

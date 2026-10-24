@@ -36,4 +36,12 @@
         android:backgroundTint="#9C27B0"
         android:text="Trigger Native Crash (SIGSEGV)" />
 
+    <Button
+        android:id="@+id/btn_trigger_anr"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="16dp"
+        android:backgroundTint="#FF9800"
+        android:text="Trigger ANR (freeze main thread)" />
+
 </LinearLayout>

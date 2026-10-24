@@ -1,5 +1,6 @@
 package io.unilitix.sdk
 
+import io.unilitix.sdk.capture.AnrTrace
 import io.unilitix.sdk.capture.RageTapDetector
 import io.unilitix.sdk.contract.SdkContract
 import io.unilitix.sdk.core.Breadcrumbs
@@ -121,7 +122,7 @@ class SdkContractTest {
 
     @Test
     fun `event types the SDK sends are canonical`() {
-        for (t in listOf("SESSION_START", "TAP", "RAGE_TAP", "NAVIGATE", "CUSTOM", "EXCEPTION", "CRASH")) {
+        for (t in listOf("SESSION_START", "TAP", "RAGE_TAP", "NAVIGATE", "CUSTOM", "EXCEPTION", "CRASH", AnrTrace.TYPE)) {
             assertTrue("$t is not in the contract", t in SdkContract.eventTypes)
         }
     }
