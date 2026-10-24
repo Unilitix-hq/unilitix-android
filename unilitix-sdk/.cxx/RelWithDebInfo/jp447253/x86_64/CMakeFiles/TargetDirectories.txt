@@ -1,3 +1,0 @@
-/Users/oluwatosinayodele/Downloads/tazama-android/unilitix-sdk/.cxx/RelWithDebInfo/jp447253/x86_64/CMakeFiles/unilitix-native.dir
-/Users/oluwatosinayodele/Downloads/tazama-android/unilitix-sdk/.cxx/RelWithDebInfo/jp447253/x86_64/CMakeFiles/edit_cache.dir
-/Users/oluwatosinayodele/Downloads/tazama-android/unilitix-sdk/.cxx/RelWithDebInfo/jp447253/x86_64/CMakeFiles/rebuild_cache.dir
