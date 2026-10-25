@@ -2,12 +2,10 @@ package io.unilitix.sdk.core
 
 import android.content.Context
 import android.content.SharedPreferences
-import android.provider.Settings
 import android.util.Log
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import io.unilitix.sdk.util.Logger
-import java.security.MessageDigest
 
 internal class Identity(private val context: Context) {
 
@@ -88,22 +86,15 @@ internal class Identity(private val context: Context) {
         }
     }
 
+    /**
+     * A random UUID, stored for the install. It is not derived from ANDROID_ID
+     * or install time, so reset() really unlinks the next user from the last
+     * one, and the id matches the iOS SDK's format.
+     */
     private fun generateAndSaveAnonymousId(): String {
-        val androidId = Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID) ?: "unknown"
-        val packageName = context.packageName
-        val installTime = try {
-            context.packageManager.getPackageInfo(packageName, 0).firstInstallTime.toString()
-        } catch (e: Exception) {
-            "0"
-        }
-        val id = sha256("$androidId$packageName$installTime").take(24)
+        val id = java.util.UUID.randomUUID().toString()
         devicePrefs.edit().putString(KEY_ANONYMOUS_ID, id).apply()
         return id
-    }
-
-    private fun sha256(input: String): String {
-        val bytes = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
-        return bytes.joinToString("") { "%02x".format(it) }
     }
 
     companion object {

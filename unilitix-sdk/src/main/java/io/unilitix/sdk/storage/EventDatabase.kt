@@ -55,6 +55,10 @@ internal abstract class EventDatabase : RoomDatabase() {
                     "unilitix_events.db"
                 )
                     .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
+                    // A database written by a newer SDK version (an app downgrade)
+                    // cannot be opened; starting empty loses only unsent events,
+                    // where throwing would crash the host app.
+                    .fallbackToDestructiveMigrationOnDowngrade()
                     .apply {
                         // Destructive migration only in debug — release builds must never silently
                         // wipe buffered events. Add an explicit migration instead.
