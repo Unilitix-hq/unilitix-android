@@ -62,8 +62,10 @@ internal data class MaskedText(val text: String, val redacted: Boolean)
  *   exempts an input from this.
  * - `maskAllText` (default on): every TextView, Button and input.
  * - `maskImages` (default off): every ImageView and bitmap background.
- * - Snapshots only: a WebView is one masked node with `maskAllText` or
- *   `maskInputs` (screenshots do not classify web views).
+ * - WebView: its page cannot be walked, so in screenshots it is masked whole
+ *   (like an unreadable Compose view, below); in snapshots it is one masked
+ *   node with `maskAllText` or `maskInputs`.
+ * - A window with `FLAG_SECURE` is never captured (screenshots or snapshots).
  * - Jetpack Compose: each node of the semantics tree is classified like a
  *   view (text field = input, `Role.Image` = image, text or content
  *   description = text). A Compose view whose semantics cannot be read in
@@ -74,6 +76,10 @@ internal data class MaskedText(val text: String, val redacted: Boolean)
 internal object ReplayMasking {
 
     const val MASKED = "[MASKED]"
+
+    /** True for a window the app marked FLAG_SECURE: it is never captured. */
+    fun isSecureWindow(windowFlags: Int): Boolean =
+        (windowFlags and android.view.WindowManager.LayoutParams.FLAG_SECURE) != 0
     private const val REDACTED_CHAR = '•'
 
     /** Rects to paint over in a screenshot, in traversal order. */

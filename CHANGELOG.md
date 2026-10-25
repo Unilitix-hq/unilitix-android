@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.10.1
+
+Safety and privacy fixes from the 24 October 2026 audit. No API removals.
+
+### Fixed
+- **The SDK can no longer crash the host app on a storage error.** SDK
+  coroutines run under an exception handler, and persisting a batch catches
+  database failures (disk full, I/O errors), dropping that batch instead of
+  throwing. A database written by a newer SDK (an app downgrade) is recreated
+  instead of failing to open.
+- **WebViews are masked in screenshots.** A WebView's page (logins, KYC and
+  payment forms) cannot be walked for its fields, so it is painted over whole
+  whenever text or inputs are masked, as the iOS SDK does.
+- **Windows marked `FLAG_SECURE` are never captured**, in screenshots or
+  wireframe snapshots.
+- **`reset()` now unlinks users.** The anonymous id is a random UUID (it used
+  to be a hash of ANDROID_ID, package and install time, so reset produced the
+  same id). Existing installs keep their stored id until the next reset.
+- **The crash handler waits at most 2 s** (the contract's fatal flush budget)
+  for the queue write, instead of always sleeping 3 s before passing the crash
+  to the next handler.
+- **Init off the main thread is safe.** `Unilitix.init` called from another
+  thread (a React Native bridge) now runs on the main thread, where lifecycle
+  observers must be registered, instead of throwing.
+
+### Added
+- `Unilitix.attachToActivity(activity)`: after a late init (React Native,
+  Flutter add-to-app), attaches taps, screen tracking and replay to the
+  Activity that already exists, instead of waiting for the next one.
+- `Unilitix.setCrashFilter { throwable -> Boolean }`: lets a wrapper SDK that
+  already reported a crash (React Native's fatal JS error) have the JVM
+  exception passed on unrecorded, so it is not counted twice.
+
 ## 1.10.0
 
 ### Added

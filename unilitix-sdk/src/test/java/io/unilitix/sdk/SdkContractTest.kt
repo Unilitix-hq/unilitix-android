@@ -134,4 +134,19 @@ class SdkContractTest {
             assertEquals(v.name, v.fingerprint, Fingerprint.of(v.exceptionType, v.stack))
         }
     }
+
+    @Test
+    fun `crash handler waits no longer than the fatal flush budget`() {
+        assertEquals(
+            SdkContract.FATAL_FLUSH_BUDGET_MS,
+            io.unilitix.sdk.capture.CrashHandler.FATAL_FLUSH_BUDGET_MS
+        )
+    }
+
+    @Test
+    fun `secure windows are never captured`() {
+        val secure = android.view.WindowManager.LayoutParams.FLAG_SECURE
+        assertTrue(io.unilitix.sdk.capture.ReplayMasking.isSecureWindow(secure or 0x100))
+        assertTrue(!io.unilitix.sdk.capture.ReplayMasking.isSecureWindow(0x100))
+    }
 }

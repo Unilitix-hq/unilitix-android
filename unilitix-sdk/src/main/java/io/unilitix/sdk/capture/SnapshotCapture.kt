@@ -110,6 +110,7 @@ internal class SnapshotCapture(
         if (!isEnabled()) return
         // maxSnapshotsPerSession: stop for the rest of this session.
         if (ordinal.get() >= config.maxSnapshotsPerSession) return
+        if (ReplayMasking.isSecureWindow(activity.window.attributes.flags)) return
         val rootView = activity.window.decorView
         // Not laid out yet: keep a pending navigation for the next tick.
         if (rootView.width <= 0 || rootView.height <= 0) return

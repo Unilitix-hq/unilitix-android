@@ -1,6 +1,7 @@
 package io.unilitix.sdk
 
 import android.app.Application
+import kotlinx.coroutines.CoroutineExceptionHandler
 import android.view.View
 import io.unilitix.sdk.BuildConfig
 import io.unilitix.sdk.capture.Anr
@@ -105,6 +106,15 @@ object Unilitix {
         consent: UnilitixConsent?,
         configure: UnilitixConfig.Builder.() -> Unit
     ) {
+        // Lifecycle observers and Activity callbacks must be registered on the
+        // main thread; a cross-platform bridge may call init from its own thread.
+        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
+            Logger.w("Unilitix.init() called off the main thread; initialising on the main thread")
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                initWith(application, apiKey, consent, configure)
+            }
+            return
+        }
         if (instance != null) {
             Logger.w("Unilitix.init() called more than once — ignoring")
             return
@@ -123,6 +133,28 @@ object Unilitix {
         instance = internal
         internal.start()
         Logger.d("✅ Unilitix SDK initialized | key=${Logger.keyLabel(apiKey)} | consent=${internal.consent.state.value} | session=${internal.sessionManager.currentSession?.id?.take(8)} | v${BuildConfig.SDK_VERSION}")
+    }
+
+    /**
+     * Attaches the SDK to an Activity that already existed when [init] ran.
+     * Call this after a late init (React Native, Flutter add-to-app) so taps,
+     * screens and replay start on the current screen instead of the next one.
+     * Safe to call more than once; a no-op before init.
+     */
+    @JvmStatic
+    fun attachToActivity(activity: android.app.Activity) {
+        instance?.attachToActivity(activity)
+    }
+
+    /**
+     * Decides, per uncaught JVM exception, whether the SDK records it (true) or
+     * only passes it on to the next handler (false). For wrapper SDKs that
+     * report a crash themselves before the platform re-throws it, such as React
+     * Native's fatal JS errors. The session is still marked crashed.
+     */
+    @JvmStatic
+    fun setCrashFilter(filter: ((Throwable) -> Boolean)?) {
+        io.unilitix.sdk.capture.CrashHandler.crashFilter = filter
     }
 
     @JvmStatic
@@ -320,7 +352,39 @@ internal class UnilitixInternal(
     internal val config: UnilitixConfig,
     initialConsent: UnilitixConsent = UnilitixConsent.GRANTED
 ) : ConsentEffects {
-    internal val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // An exception in SDK work (a full disk, a database error) must never reach
+    // the host app's uncaught-exception handler: it is logged and dropped here.
+    internal val scope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, t ->
+            Logger.e("Unilitix: background task failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    )
+
+    /** Activity callbacks the SDK registered, so a late init can attach them to the current Activity. */
+    private val lifecycleCallbacks = mutableListOf<Application.ActivityLifecycleCallbacks>()
+
+    private fun registerCallbacks(cb: Application.ActivityLifecycleCallbacks) {
+        lifecycleCallbacks += cb
+        application.registerActivityLifecycleCallbacks(cb)
+    }
+
+    /**
+     * Replays created/started/resumed for an Activity that already existed when
+     * the SDK started (React Native and other late inits), so taps, screens and
+     * replay attach to it instead of waiting for the next Activity.
+     */
+    internal fun attachToActivity(activity: android.app.Activity) {
+        if (activity.isFinishing) return
+        for (cb in lifecycleCallbacks.toList()) {
+            try {
+                cb.onActivityCreated(activity, null)
+                cb.onActivityStarted(activity)
+                cb.onActivityResumed(activity)
+            } catch (t: Throwable) {
+                Logger.e("Unilitix: attach to current activity failed: ${t.message}")
+            }
+        }
+    }
 
     internal val identity = Identity(application)
     internal val apiClient = ApiClient(config.apiUrl, apiKey)
@@ -401,7 +465,7 @@ internal class UnilitixInternal(
 
     fun start() {
         if (config.autoTrackScreens) {
-            application.registerActivityLifecycleCallbacks(
+            registerCallbacks(
                 ScreenTracker { screenName ->
                     scope.launch { emitEvent(UnilitixEvent(type = "NAVIGATE", screen = screenName)) }
                 }
@@ -427,7 +491,7 @@ internal class UnilitixInternal(
                 }
             } else null
 
-            application.registerActivityLifecycleCallbacks(
+            registerCallbacks(
                 TouchTracker(
                     maskInputs = config.maskInputs,
                     maskedViewIds = config.maskedViewIds
@@ -489,7 +553,7 @@ internal class UnilitixInternal(
             ) { snapshot ->
                 if (consent.canCapture) snapshotBuffer.add(snapshot)
             }
-            application.registerActivityLifecycleCallbacks(snapshotCapture!!)
+            registerCallbacks(snapshotCapture!!)
         }
 
         if (config.captureScreenshots) {
@@ -526,7 +590,7 @@ internal class UnilitixInternal(
                     }
                 }
             }
-            application.registerActivityLifecycleCallbacks(screenshotCapture!!)
+            registerCallbacks(screenshotCapture!!)
         }
 
         if (!consent.canCapture) batteryInfo.stopObserving()
@@ -812,6 +876,18 @@ internal class UnilitixInternal(
     }
 
     internal suspend fun flushNow(session: Session? = null) {
+        try {
+            flushNowUnsafe(session)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (t: Throwable) {
+            // Storage failures (disk full, corrupt or downgraded database) cost
+            // this batch, never the host app.
+            Logger.e("Unilitix: could not persist events: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    }
+
+    private suspend fun flushNowUnsafe(session: Session? = null) {
         // Native crashes of earlier processes are queued first (bounded wait).
         if (!nativeCrashesQueued.isCompleted) {
             withTimeoutOrNull(NATIVE_CRASH_WAIT_MS) { nativeCrashesQueued.await() }

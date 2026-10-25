@@ -122,6 +122,10 @@ internal class ScreenshotCapture(
         if (!isEnabled()) return
         if (ordinal >= config.maxScreenshotsPerSession) return
 
+        // FLAG_SECURE marks a screen the app keeps out of screenshots and the
+        // recents list (banking, payments): replay honours it.
+        if (ReplayMasking.isSecureWindow(activity.window.attributes.flags)) return
+
         val rootView = activity.window.decorView.rootView
         if (rootView.width == 0 || rootView.height == 0) return
 
@@ -207,7 +211,10 @@ internal class ScreenshotCapture(
         private val compose: ComposeTree? by lazy(LazyThreadSafetyMode.NONE) {
             if (ComposeHost.isHost(view)) ComposeHost.read(view) else null
         }
-        override val isUnreadable: Boolean get() = compose?.unreadableForScreenshot ?: false
+        // A WebView's page (logins, KYC and payment forms) cannot be walked for
+        // its text and inputs, so it is masked whole, as on iOS.
+        override val isUnreadable: Boolean
+            get() = view is android.webkit.WebView || (compose?.unreadableForScreenshot ?: false)
         override val kind: NodeKind
             get() = when {
                 view is EditText -> NodeKind.INPUT

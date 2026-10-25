@@ -60,6 +60,14 @@ internal class CrashHandler(
             // exception is the crash, not the signal that may follow it.
             try { markNativeHandled() } catch (e: Throwable) { /* already crashing */ }
             if (!isEnabled()) return // finally still hands the crash to the original handler
+            // A wrapper SDK that already reported this crash itself (React
+            // Native's fatal JS error, re-thrown as JavascriptException) asks
+            // for it to be passed on unrecorded, so it is not counted twice.
+            val filter = crashFilter
+            if (filter != null && !runCatching { filter(throwable) }.getOrDefault(true)) {
+                onCrash()
+                return // finally still hands the crash to the original handler
+            }
             onCrash()
 
             val stackTrace = throwable.stackTraceToString().take(16_000)
@@ -99,7 +107,11 @@ internal class CrashHandler(
             // Write to disk first — if Room is unavailable during the crash this is the fallback.
             persistCrashToDisk(sessionJson, eventsJson)
 
-            // Fire DB insert without blocking the crash thread.
+            // Insert into the queue database, waiting at most the contract's
+            // fatal flush budget (2 s): the disk copy above already survives
+            // the process, and the next handler (Crashlytics, the system dialog)
+            // must not be held up longer than that.
+            val persisted = java.util.concurrent.CountDownLatch(1)
             crashScope.launch {
                 try {
                     database.eventDao().insert(
@@ -114,11 +126,11 @@ internal class CrashHandler(
                 } catch (e: Exception) {
                     Logger.e("CrashHandler: failed to persist crash to DB", e)
                     // Disk copy remains and will be recovered on next launch.
+                } finally {
+                    persisted.countDown()
                 }
             }
-
-            // Give the coroutine up to 3 seconds before letting the process die.
-            Thread.sleep(3_000)
+            persisted.await(FATAL_FLUSH_BUDGET_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
 
         } catch (e: Exception) {
             Logger.e("CrashHandler: error in crash handler", e)
@@ -145,5 +157,14 @@ internal class CrashHandler(
         val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
         sdf.timeZone = TimeZone.getTimeZone("UTC")
         return sdf.format(Date())
+    }
+
+    internal companion object {
+        /** Set through [io.unilitix.sdk.Unilitix.setCrashFilter]; false = do not record. */
+        @Volatile
+        var crashFilter: ((Throwable) -> Boolean)? = null
+
+        /** Contract `fatalFlushBudgetMs`: the longest a crash may hold the crashing thread. */
+        const val FATAL_FLUSH_BUDGET_MS = 2_000L
     }
 }

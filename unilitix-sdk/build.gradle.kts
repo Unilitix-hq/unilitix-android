@@ -93,7 +93,7 @@ publishing {
         create<MavenPublication>("release") {
             groupId = "com.unilitix"
             artifactId = "unilitix-android"
-            version = "1.10.0"
+            version = "1.10.1"
 
             afterEvaluate {
                 from(components["release"])
