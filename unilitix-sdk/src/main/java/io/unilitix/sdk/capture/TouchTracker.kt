@@ -29,21 +29,39 @@ internal class TouchTracker(
     }
 
     private fun installCallback(activity: Activity) {
-        val original = activity.window.callback ?: return
-        val screenName = activity.javaClass.simpleName
-
-        val wrapper = object : Window.Callback by original {
-            override fun dispatchTouchEvent(event: MotionEvent?): Boolean {
-                if (event?.action == MotionEvent.ACTION_DOWN) {
-                    handleTap(activity, event, screenName)
-                }
-                return original.dispatchTouchEvent(event)
-            }
+        try {
+            val window = activity.window ?: return
+            val original = window.callback ?: return
+            // Already ours (attachToActivity after onActivityCreated, or a
+            // second init): wrapping again would report every tap twice.
+            if (original is TapCallback || wrappedCallbacks.containsKey(activity)) return
+            val wrapper = TapCallback(original, activity, activity.javaClass.simpleName)
+            window.callback = wrapper
+            wrappedCallbacks[activity] = wrapper
+            Logger.d("TouchTracker: installed on ${activity.javaClass.simpleName}")
+        } catch (t: Throwable) {
+            Logger.d("TouchTracker: not installed on ${activity.javaClass.simpleName}: ${t.message}")
         }
+    }
 
-        activity.window.callback = wrapper
-        wrappedCallbacks[activity] = wrapper
-        Logger.d("TouchTracker: installed on $screenName")
+    /** The SDK's Window.Callback wrapper; a named type so it can be recognised. */
+    private inner class TapCallback(
+        private val original: Window.Callback,
+        private val activity: Activity,
+        private val screenName: String
+    ) : Window.Callback by original {
+        override fun dispatchTouchEvent(event: MotionEvent?): Boolean {
+            if (event?.action == MotionEvent.ACTION_DOWN) {
+                // Inside the host's dispatchTouchEvent: the SDK's hit test must
+                // never throw into it, and the event is always passed on.
+                try {
+                    handleTap(activity, event, screenName)
+                } catch (t: Throwable) {
+                    Logger.d("TouchTracker: tap not recorded: ${t.javaClass.simpleName}: ${t.message}")
+                }
+            }
+            return original.dispatchTouchEvent(event)
+        }
     }
 
     private fun handleTap(activity: Activity, event: MotionEvent, screenName: String) {

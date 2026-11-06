@@ -24,6 +24,7 @@ import io.unilitix.sdk.UnilitixConfig
 import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.core.Snapshot
 import io.unilitix.sdk.util.Logger
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -66,7 +67,14 @@ internal class SnapshotCapture(
 ) : Application.ActivityLifecycleCallbacks {
 
     private val handler = Handler(Looper.getMainLooper())
-    private val captureScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // Like the SDK's main scope (1.10.2): a failure while encoding (including
+    // OutOfMemoryError on a huge tree) is logged and dropped, never rethrown
+    // to the host's uncaught-exception handler.
+    private val captureScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, t ->
+            Logger.w("SnapshotCapture: background task failed: ${t.javaClass.simpleName}: ${t.message}")
+        }
+    )
     private val ordinal = AtomicInteger(0)
 
     private val maskPolicy = MaskPolicy(
@@ -82,7 +90,12 @@ internal class SnapshotCapture(
 
     private val tickRunnable = object : Runnable {
         override fun run() {
-            currentActivity?.let { tick(it) }
+            try {
+                currentActivity?.let { tick(it) }
+            } catch (t: Throwable) {
+                // Runs on the host's main looper: nothing may escape.
+                Logger.w("SnapshotCapture: ${t.javaClass.simpleName}: ${t.message}")
+            }
             handler.postDelayed(this, TICK_MS)
         }
     }
@@ -147,12 +160,13 @@ internal class SnapshotCapture(
                             hierarchy      = tree.toJson()
                         )
                     )
-                } catch (e: Exception) {
-                    Logger.w("SnapshotCapture: ${e.message}")
+                } catch (t: Throwable) {
+                    Logger.w("SnapshotCapture: ${t.javaClass.simpleName}: ${t.message}")
                 }
             }
-        } catch (e: Exception) {
-            Logger.w("SnapshotCapture: ${e.message}")
+        } catch (t: Throwable) {
+            // Includes OutOfMemoryError and StackOverflowError on a pathological tree.
+            Logger.w("SnapshotCapture: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 

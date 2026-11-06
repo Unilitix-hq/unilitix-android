@@ -11,6 +11,7 @@ import android.net.NetworkRequest
 import android.os.Build
 import android.telephony.TelephonyManager
 import androidx.core.content.ContextCompat
+import io.unilitix.sdk.util.Logger
 
 internal data class NetworkInfo(
     val connectionType: String,
@@ -90,8 +91,19 @@ internal fun isWifi(context: Context): Boolean {
 
 internal class NetworkMonitor(private val context: Context) {
 
-    fun currentType(): String {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    /**
+     * The network type now. Never throws: it runs for every event and on the
+     * system's ConnectivityThread, where an exception would crash the host.
+     */
+    fun currentType(): String = try {
+        currentTypeUnsafe()
+    } catch (t: Throwable) {
+        "UNKNOWN"
+    }
+
+    private fun currentTypeUnsafe(): String {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+            ?: return "UNKNOWN"
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val caps = cm.getNetworkCapabilities(cm.activeNetwork)
             when {
@@ -115,19 +127,39 @@ internal class NetworkMonitor(private val context: Context) {
 
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
-    fun observeNetworkTransitions(onChange: (String) -> Unit) {
-        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+    /**
+     * Counts network transitions through a ConnectivityManager callback.
+     * Returns false when the callback could not be registered: some Android 11
+     * builds throw SecurityException, and an app already holding the maximum
+     * number of callbacks gets TooManyRequestsException. The SDK then carries
+     * on without transition counts; [currentType] is still read per event.
+     */
+    fun observeNetworkTransitions(onChange: (String) -> Unit): Boolean {
         val callback = object : ConnectivityManager.NetworkCallback() {
-            override fun onAvailable(network: Network) = onChange(currentType())
-            override fun onLost(network: Network) = onChange(currentType())
-            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = onChange(currentType())
+            override fun onAvailable(network: Network) = report()
+            override fun onLost(network: Network) = report()
+            override fun onCapabilitiesChanged(network: Network, caps: NetworkCapabilities) = report()
+
+            // Runs on the system's ConnectivityThread: must never throw.
+            private fun report() {
+                try { onChange(currentType()) } catch (_: Throwable) {}
+            }
         }
-        networkCallback = callback
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            cm.registerDefaultNetworkCallback(callback)
-        } else {
-            @Suppress("DEPRECATION")
-            cm.registerNetworkCallback(NetworkRequest.Builder().build(), callback)
+        return try {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager
+                ?: return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+                cm.registerDefaultNetworkCallback(callback)
+            } else {
+                @Suppress("DEPRECATION")
+                cm.registerNetworkCallback(NetworkRequest.Builder().build(), callback)
+            }
+            networkCallback = callback
+            true
+        } catch (t: Throwable) {
+            networkCallback = null
+            Logger.d("NetworkMonitor: network callback not registered (${t.javaClass.simpleName}: ${t.message}); network transitions will not be counted")
+            false
         }
     }
 

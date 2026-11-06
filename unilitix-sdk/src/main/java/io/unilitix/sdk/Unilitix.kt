@@ -32,6 +32,7 @@ import io.unilitix.sdk.core.SharedPreferencesStore
 import io.unilitix.sdk.core.ErrorReportLimiter
 import io.unilitix.sdk.core.EventBuffer
 import io.unilitix.sdk.core.Fingerprint
+import io.unilitix.sdk.core.GuardedInit
 import io.unilitix.sdk.core.Identity
 import io.unilitix.sdk.core.Session
 import io.unilitix.sdk.core.SessionHistory
@@ -52,6 +53,7 @@ import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -119,19 +121,27 @@ object Unilitix {
             Logger.w("Unilitix.init() called more than once — ignoring")
             return
         }
-        val builder = UnilitixConfig.Builder().apply(configure)
-        val initialConsent = consent ?: builder.consent
-        val config = builder.build()
-        // Applies in release builds of the library too (it used to be gated on
-        // the library's own BuildConfig.DEBUG, which is false in the AAR).
-        Logger.configure(config.debugLogging)
-        if (config.sessionTimeoutSeconds < 60) {
-            Logger.w("Unilitix: sessionTimeoutSeconds=${config.sessionTimeoutSeconds} is very low — consider 1800 (30 min) to avoid session fragmentation")
-        }
-
-        val internal = UnilitixInternal(application, apiKey, config, initialConsent)
+        // Exception barrier (1.10.2): nothing below may throw into the host's
+        // Application.onCreate. On failure the SDK stays off (every public
+        // call is a no-op while `instance` is null) and a later init can retry.
+        val internal = GuardedInit.run(
+            create = {
+                val builder = UnilitixConfig.Builder().apply(configure)
+                val initialConsent = consent ?: builder.consent
+                val config = builder.build() // clamps out-of-range values
+                // Applies in release builds of the library too (it used to be gated on
+                // the library's own BuildConfig.DEBUG, which is false in the AAR).
+                Logger.configure(config.debugLogging)
+                if (config.sessionTimeoutSeconds < 60) {
+                    Logger.w("Unilitix: sessionTimeoutSeconds=${config.sessionTimeoutSeconds} is very low — consider 1800 (30 min) to avoid session fragmentation")
+                }
+                UnilitixInternal(application, apiKey, config, initialConsent)
+            },
+            start = { it.start() },
+            teardown = { it.shutdown() }
+        ) ?: return
+        // Published only once fully started: callers never see a half-started SDK.
         instance = internal
-        internal.start()
         Logger.d("✅ Unilitix SDK initialized | key=${Logger.keyLabel(apiKey)} | consent=${internal.consent.state.value} | session=${internal.sessionManager.currentSession?.id?.take(8)} | v${BuildConfig.SDK_VERSION}")
     }
 
@@ -411,7 +421,7 @@ internal class UnilitixInternal(
     // In-memory until the next successful batch; bounded separately from the
     // per-session cap so a long offline or consent-pending stretch cannot hold
     // 1500 view trees in memory.
-    internal val snapshotBuffer = SnapshotBuffer(config.maxSnapshotsPerSession.coerceAtMost(SnapshotBuffer.MAX_HELD))
+    internal val snapshotBuffer = SnapshotBuffer(config.maxSnapshotsPerSession.coerceIn(1, SnapshotBuffer.MAX_HELD))
 
     /** Backoff window and 401/403 latch shared by every uploader (contract "Upload and retry"). */
     internal val uploadGate = UploadGate()
@@ -433,6 +443,7 @@ internal class UnilitixInternal(
 
     private var snapshotCapture: SnapshotCapture? = null
     private var screenshotCapture: ScreenshotCapture? = null
+    private var crashHandler: CrashHandler? = null
 
     /** See [Unilitix.nativeCrashCaptureActive]; set once in [start]. */
     @Volatile
@@ -447,6 +458,8 @@ internal class UnilitixInternal(
             screenshotCapture?.resetOrdinal()
             snapshotCapture?.resetSession()
             errorLimiter.resetSession()
+            // frame_drops counts this session's janky frames, not the process's.
+            performanceMonitor.resetFrameDrops()
         },
         onSessionEnd = { session ->
             Logger.d("Session ended: ${session.id}")
@@ -518,7 +531,7 @@ internal class UnilitixInternal(
         val nativeRecord = NativeCrashFile.consume(nativeCrashFile)
 
         if (config.autoTrackCrashes) {
-            CrashHandler(
+            crashHandler = CrashHandler(
                 context = application,
                 breadcrumbs = breadcrumbs,
                 database = database,
@@ -526,7 +539,7 @@ internal class UnilitixInternal(
                 onCrash = { sessionManager.markCrashed() },
                 isEnabled = { consent.canCapture },
                 admitReport = { fingerprint -> errorLimiter.admit(fingerprint) != null }
-            ).install()
+            ).also { it.install() }
             // API 21-29 only; API 30+ reads ApplicationExitInfo instead.
             val handlerInstalled = NativeSignalHandler.install(nativeCrashFile)
             nativeCrashCaptureActive = handlerInstalled ||
@@ -595,25 +608,61 @@ internal class UnilitixInternal(
 
         if (!consent.canCapture) batteryInfo.stopObserving()
 
-        performanceMonitor.start()
+        // Frame-drop tracking runs only while an activity is resumed (1.10.2).
+        registerCallbacks(performanceMonitor)
 
+        // Never fatal: without the callback, transitions are not counted but
+        // every event still reads the current network type when it is captured.
         networkMonitor.observeNetworkTransitions { newType ->
             scope.launch { sessionManager.onNetworkTypeChanged(newType) }
         }
 
+        // config.flushIntervalSeconds is clamped to >= 1 by build(); a period
+        // <= 0 made scheduleAtFixedRate throw out of init before 1.10.2.
+        val flushPeriod = config.flushIntervalSeconds.toLong().coerceAtLeast(1L)
         scheduler.scheduleAtFixedRate(
             { scope.launch { flushNow() } },
-            config.flushIntervalSeconds.toLong(),
-            config.flushIntervalSeconds.toLong(),
+            flushPeriod,
+            flushPeriod,
             TimeUnit.SECONDS
         )
 
         scheduler.scheduleAtFixedRate(
-            { performanceMonitor.sampleCpu() },
+            {
+                // An exception would cancel the repeating task silently; keep sampling.
+                try { performanceMonitor.sampleCpu() } catch (_: Throwable) {}
+            },
             5L, 5L, TimeUnit.SECONDS
         )
 
         Logger.d("UnilitixInternal: started")
+    }
+
+    /**
+     * Undoes what [start] registered, after it failed part way (see
+     * [GuardedInit]). Best effort: each step is independent and none throws.
+     * Not a public "stop the SDK" API.
+     */
+    internal fun shutdown() {
+        fun step(name: String, block: () -> Unit) {
+            try { block() } catch (t: Throwable) { Logger.d("Unilitix: shutdown step $name failed: ${t.message}") }
+        }
+        step("activity callbacks") {
+            for (cb in lifecycleCallbacks.toList()) {
+                try { application.unregisterActivityLifecycleCallbacks(cb) } catch (_: Throwable) {}
+            }
+            lifecycleCallbacks.clear()
+        }
+        step("performance monitor") { performanceMonitor.stop() }
+        step("network callback") { networkMonitor.stopObserving() }
+        step("battery receiver") { batteryInfo.stopObserving() }
+        step("scheduler") { scheduler.shutdownNow() }
+        step("session observer") {
+            androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(sessionManager)
+        }
+        step("crash handler") { crashHandler?.uninstall() }
+        crashHandler = null
+        step("scope") { scope.cancel() }
     }
 
     private fun recoverPendingCrash() {

@@ -7,7 +7,7 @@ The 3-line analytics SDK built for African mobile apps.
 Add to your app's `build.gradle.kts`:
 
 ```kotlin
-implementation("com.unilitix:unilitix-android:1.10.1")
+implementation("com.unilitix:unilitix-android:1.10.2")
 ```
 
 Add JitPack to your root `settings.gradle.kts`:
@@ -141,6 +141,12 @@ Show views that carry no personal data (headings, button labels, navigation) wit
 ```
 
 `unmask` never exempts inputs, `maskedViewIds` or `@UnilitixPrivate` views.
+
+`@UnilitixPrivate` works on **View classes** only (`@UnilitixPrivate class CardNumberView : EditText`).
+On a field or property (`@UnilitixPrivate val card: View`) it has no effect: the SDK sees the
+view object, not the field that refers to it. For a single view instance use `maskedViewIds`.
+The SDK's consumer ProGuard/R8 rules keep the annotation on annotated classes in minified apps
+(1.10.2; earlier versions could lose it under R8 full mode).
 
 #### Jetpack Compose
 

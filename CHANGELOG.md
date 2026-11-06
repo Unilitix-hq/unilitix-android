@@ -1,5 +1,59 @@
 # Changelog
 
+## 1.10.2
+
+Host-app safety fixes from the go-live audit. No API changes; a drop-in
+update from 1.10.1.
+
+### Fixed
+- **`Unilitix.init` can no longer crash the app.** Anything that fails while
+  the SDK starts (for example the network callback that some Android 11
+  devices refuse with a `SecurityException`, or an app that already holds too
+  many network callbacks) is caught. The SDK logs one warning, undoes what it
+  had set up and stays switched off for that launch; calling `init` again
+  later retries. Before, a failed init also blocked every later attempt.
+- **The network-change listener is optional.** If it cannot be registered the
+  SDK carries on; the network type is still read for every event.
+- **Out-of-range configuration values are corrected instead of failing.** A
+  `flushIntervalSeconds` of 0 or less (which used to make init throw),
+  `screenshotQuality` outside 0–100, a non-positive `screenshotMaxWidth`,
+  batch size, or a `sampleRate` outside 0–1 are clamped to the nearest valid
+  value.
+- **Screenshots use far less memory and can no longer cause an
+  out-of-memory crash.** Each frame is now drawn directly at the upload size
+  (`screenshotMaxWidth`, 480 px by default) instead of at full screen
+  resolution and then copied twice, about 5–10× less memory per capture.
+  Any failure while capturing or encoding, including running out of memory,
+  drops that frame. After an out-of-memory error, screenshots stay off for
+  the rest of the process. Snapshot (wireframe) capture errors are contained
+  in the same way.
+- **`@UnilitixPrivate` survives R8.** The SDK's consumer rules now keep the
+  annotation on annotated View classes in minified apps (and stop R8 from
+  merging those classes), so they stay masked and excluded from taps.
+- **Narrower ProGuard/R8 rules.** The SDK no longer keeps every Room database,
+  entity and DAO in your app, and no longer turns off R8 warnings for all of
+  OkHttp, Okio and coroutines. It keeps only its own classes.
+- **Frame-drop tracking only runs while your app is on screen.** It used to
+  wake the main thread on every frame for the life of the process, including
+  in the background. The `frameDrops` count now restarts with each session,
+  and the gap while the app was in the background no longer counts as a drop.
+- **Taps are never recorded twice and never break touch handling.** Calling
+  `Unilitix.attachToActivity` on an Activity the SDK already tracks no longer
+  wraps its touch handler a second time. Any error while recording a tap is
+  caught before it can reach your app's `dispatchTouchEvent`.
+- **Sessions report the right `sdkVersion`.** 1.10.1 reported itself as
+  1.10.0. The version now has a single source (`unilitix.version` in
+  `gradle.properties`) for both the published artifact and the reported value.
+
+### Documentation
+- `@UnilitixPrivate` applies to View classes only. Annotating a field or
+  property compiles but has no effect; use `maskedViewIds` for single views.
+
+### Build
+- Pull requests and pushes to `main` now run unit tests, lint and the release
+  build in CI (`.github/workflows/ci.yml`). The publish workflow also runs
+  lint, and retries the NDK install.
+
 ## 1.10.1
 
 Safety and privacy fixes from the 24 October 2026 audit. No API removals.
