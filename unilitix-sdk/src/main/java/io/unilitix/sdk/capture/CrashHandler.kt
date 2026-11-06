@@ -54,6 +54,16 @@ internal class CrashHandler(
         Logger.d("CrashHandler: installed")
     }
 
+    /**
+     * Puts the previous handler back, only if nobody installed another one on
+     * top of this since (then this stays in their chain). Used when init fails.
+     */
+    fun uninstall() {
+        if (Thread.getDefaultUncaughtExceptionHandler() === this) {
+            Thread.setDefaultUncaughtExceptionHandler(originalHandler)
+        }
+    }
+
     override fun uncaughtException(thread: Thread, throwable: Throwable) {
         try {
             // First, even when nothing is recorded (consent denied): this

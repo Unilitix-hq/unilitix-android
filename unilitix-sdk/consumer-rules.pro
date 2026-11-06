@@ -2,10 +2,19 @@
 -keep public class io.unilitix.sdk.Unilitix { *; }
 -keep public class io.unilitix.sdk.UnilitixConfig { *; }
 -keep public class io.unilitix.sdk.UnilitixConfig$Builder { *; }
--keep public @interface io.unilitix.sdk.UnilitixPrivate
 -keep public enum io.unilitix.sdk.UnilitixConsent { *; }
--keepclassmembers class ** {
-    @io.unilitix.sdk.UnilitixPrivate *;
+
+# @UnilitixPrivate is read at runtime with Class.isAnnotationPresent on the
+# app's own View classes. Without these rules R8 (full mode especially) may
+# drop the annotation attribute, or merge/inline an annotated class, and the
+# view is then neither masked in replay nor excluded from taps.
+-keepattributes RuntimeVisibleAnnotations
+-keep @interface io.unilitix.sdk.UnilitixPrivate
+# Annotated classes may still be renamed or removed when unused, but keep
+# their annotation and stay distinct classes (no class merging).
+-keep,allowobfuscation,allowshrinking @io.unilitix.sdk.UnilitixPrivate class *
+-keepclassmembers,allowobfuscation class * {
+    @io.unilitix.sdk.UnilitixPrivate <fields>;
 }
 
 # Native crash capture (API 21-29): libunilitix-native.so binds these JNI
@@ -28,16 +37,13 @@
     public static boolean nativeCrashCaptureActive();
 }
 
-# OkHttp
--dontwarn okhttp3.**
--dontwarn okio.**
+# Room: only the SDK's own database (io.unilitix.sdk.storage). Room's own
+# consumer rules cover the generated *_Impl lookup; these rules used to keep
+# every Room database, entity and DAO of the host app too (1.10.2: narrowed).
+-keep class io.unilitix.sdk.storage.** extends androidx.room.RoomDatabase { *; }
+-keep @androidx.room.Entity class io.unilitix.sdk.storage.** { *; }
+-keep @androidx.room.Dao interface io.unilitix.sdk.storage.** { *; }
 
-# Room
--keep class * extends androidx.room.RoomDatabase
--keep @androidx.room.Entity class *
--keep @androidx.room.Dao interface *
-
-# Kotlin coroutines
--keepnames class kotlinx.coroutines.internal.MainDispatcherFactory {}
--keepnames class kotlinx.coroutines.CoroutineExceptionHandler {}
--dontwarn kotlinx.coroutines.**
+# OkHttp, Okio and kotlinx.coroutines ship their own consumer rules; the
+# blanket dontwarn rules for OkHttp, Okio and kotlinx.coroutines that used to
+# be here hid real warnings in the host app's own code paths (removed 1.10.2).

@@ -158,34 +158,47 @@ data class UnilitixConfig internal constructor(
         fun maxScreenshotsPerMinute(v: Int)        = apply { maxScreenshotsPerMinute = v }
         fun screenshotHeartbeatMs(v: Long)         = apply { screenshotHeartbeatMs = v }
 
+        /**
+         * Out-of-range values are clamped here (1.10.2), never thrown on: a
+         * zero or negative flush interval used to make `Unilitix.init` throw
+         * from `scheduleAtFixedRate`, and a quality outside 0–100 made every
+         * screenshot encode fail.
+         */
         fun build() = UnilitixConfig(
             apiUrl                    = apiUrl,
             autoTrackScreens          = autoTrackScreens,
             autoTrackTaps             = autoTrackTaps,
             autoTrackCrashes          = autoTrackCrashes,
             autoTrackRageTaps         = autoTrackRageTaps,
-            flushIntervalSeconds      = flushIntervalSeconds,
-            flushBatchSize            = flushBatchSize,
-            maxOfflineEvents          = maxOfflineEvents,
-            sessionTimeoutSeconds     = sessionTimeoutSeconds,
+            flushIntervalSeconds      = flushIntervalSeconds.coerceAtLeast(MIN_FLUSH_INTERVAL_SECONDS),
+            flushBatchSize            = flushBatchSize.coerceAtLeast(1),
+            maxOfflineEvents          = maxOfflineEvents.coerceAtLeast(1),
+            sessionTimeoutSeconds     = sessionTimeoutSeconds.coerceAtLeast(0),
             debugLogging              = debugLogging,
             maskInputs                = maskInputs,
             maskedViewIds             = maskedViewIds,
-            sampleRate                = sampleRate,
+            sampleRate                = if (sampleRate.isNaN()) 1.0 else sampleRate.coerceIn(0.0, 1.0),
             captureSnapshots          = captureSnapshots,
             snapshotIntervalMs        = snapshotIntervalMs.coerceIn(1_000L, 60_000L),
-            maxSnapshotsPerSession    = maxSnapshotsPerSession,
+            maxSnapshotsPerSession    = maxSnapshotsPerSession.coerceAtLeast(0),
             captureScreenshots        = captureScreenshots,
-            screenshotIntervalMs      = screenshotIntervalMs,
-            screenshotQuality         = screenshotQuality,
-            screenshotMaxWidth        = screenshotMaxWidth,
+            screenshotIntervalMs      = screenshotIntervalMs.coerceAtLeast(0L),
+            screenshotQuality         = screenshotQuality.coerceIn(0, 100),
+            screenshotMaxWidth        = screenshotMaxWidth.coerceAtLeast(MIN_SCREENSHOT_WIDTH),
             uploadScreenshotsOnWifiOnly = uploadScreenshotsOnWifiOnly,
-            maxScreenshotsPerSession  = maxScreenshotsPerSession,
+            maxScreenshotsPerSession  = maxScreenshotsPerSession.coerceAtLeast(0),
             maskInputsInScreenshots   = maskInputsInScreenshots,
             maskAllText               = maskAllText,
             maskImages                = maskImages,
             maxScreenshotsPerMinute   = maxScreenshotsPerMinute.coerceAtLeast(0),
             screenshotHeartbeatMs     = screenshotHeartbeatMs.coerceAtLeast(0L),
         )
+    }
+
+    internal companion object {
+        /** Smallest flush interval; `scheduleAtFixedRate` rejects a period <= 0. */
+        const val MIN_FLUSH_INTERVAL_SECONDS = 1
+        /** Smallest screenshot width; a bitmap needs at least one pixel. */
+        const val MIN_SCREENSHOT_WIDTH = 1
     }
 }

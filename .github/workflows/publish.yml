@@ -25,16 +25,30 @@ jobs:
           NDK=$(grep -E '^\s*ndkVersion = ' unilitix-sdk/build.gradle.kts | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
           test -n "$NDK" || { echo "ndkVersion not found in unilitix-sdk/build.gradle.kts"; exit 1; }
           echo "NDK $NDK"
-          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install "ndk;$NDK" "cmake;3.22.1" > /dev/null
+          # sdkmanager downloads sometimes fail with "Archive is not a ZIP
+          # archive" (a truncated download): retry, clearing the partial install.
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          for attempt in 1 2 3 4; do
+            # `yes` dies of SIGPIPE when sdkmanager exits, so the pipeline's
+            # status is not trusted (pipefail): the installed files are checked.
+            yes | "$SDKMANAGER" --install "ndk;$NDK" "cmake;3.22.1" > /dev/null || true
+            if [ -f "$ANDROID_HOME/ndk/$NDK/source.properties" ] && [ -d "$ANDROID_HOME/cmake/3.22.1" ]; then break; fi
+            echo "sdkmanager attempt $attempt failed; retrying"
+            rm -rf "$ANDROID_HOME/ndk/$NDK" "$ANDROID_HOME/.temp" "$ANDROID_HOME/temp"
+            sleep $((attempt * 15))
+          done
+          test -f "$ANDROID_HOME/ndk/$NDK/source.properties" || { echo "NDK $NDK not installed after retries"; exit 1; }
 
       - name: Tag matches the library version
         run: |
           TAG="${GITHUB_REF_NAME#v}"
-          LIB=$(grep -E 'version = "' unilitix-sdk/build.gradle.kts | head -1 | sed -E 's/.*"([^"]+)".*/\1/')
-          test "$TAG" = "$LIB" || { echo "tag $TAG != build.gradle.kts $LIB"; exit 1; }
+          LIB=$(grep -E '^unilitix\.version=' gradle.properties | cut -d= -f2 | tr -d '[:space:]')
+          test -n "$LIB" || { echo "unilitix.version not found in gradle.properties"; exit 1; }
+          test "$TAG" = "$LIB" || { echo "tag $TAG != gradle.properties unilitix.version $LIB"; exit 1; }
 
-      - name: Unit tests and release build
-        run: ./gradlew :unilitix-sdk:testDebugUnitTest :unilitix-sdk:assembleRelease
+      # Nothing is published unless tests and lint pass on the tagged commit.
+      - name: Unit tests, lint and release build
+        run: ./gradlew :unilitix-sdk:testDebugUnitTest :unilitix-sdk:lintDebug :unilitix-sdk:assembleRelease
 
       - name: AAR contains the native library for every ABI
         run: |

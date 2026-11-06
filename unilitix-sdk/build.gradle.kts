@@ -6,6 +6,11 @@ plugins {
     id("signing")
 }
 
+// Single source of the SDK version (gradle.properties `unilitix.version`):
+// the Maven publication and BuildConfig.SDK_VERSION (reported as sdkVersion
+// and in the User-Agent) cannot drift apart again (1.10.1 reported 1.10.0).
+val unilitixVersion: String = providers.gradleProperty("unilitix.version").get()
+
 android {
     namespace = "io.unilitix.sdk"
     compileSdk = 36
@@ -19,7 +24,7 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         consumerProguardFiles("consumer-rules.pro")
 
-        buildConfigField("String", "SDK_VERSION", "\"1.10.0\"")
+        buildConfigField("String", "SDK_VERSION", "\"$unilitixVersion\"")
 
         ndk {
             // Every ABI the NDK still supports; apps keep only the ones they ship.
@@ -93,7 +98,7 @@ publishing {
         create<MavenPublication>("release") {
             groupId = "com.unilitix"
             artifactId = "unilitix-android"
-            version = "1.10.1"
+            version = unilitixVersion
 
             afterEvaluate {
                 from(components["release"])

@@ -71,8 +71,23 @@ internal class ScreenshotCapture(
 
     private val captureRunnable = object : Runnable {
         override fun run() {
-            currentActivity?.let { capture(it) }
+            if (failureLatch.disabled) return // off for this process: stop ticking
+            try {
+                currentActivity?.let { capture(it) }
+            } catch (t: Throwable) {
+                // Runs on the host's main looper: nothing may escape.
+                onCaptureFailure("capture", t)
+                if (failureLatch.disabled) return
+            }
             handler.postDelayed(this, tickMs)
+        }
+    }
+
+    private fun onCaptureFailure(stage: String, t: Throwable) {
+        if (failureLatch.record(t)) {
+            Logger.w("ScreenshotCapture: out of memory during $stage; screenshots disabled for this process")
+        } else {
+            Logger.w("ScreenshotCapture: $stage failed: ${t.javaClass.simpleName}: ${t.message}")
         }
     }
 
@@ -81,11 +96,16 @@ internal class ScreenshotCapture(
     }
 
     override fun onActivityResumed(activity: Activity) {
-        currentActivity = activity
-        scheduler.markDirty() // a new screen
-        observeDraws(activity.window.decorView)
-        handler.removeCallbacks(captureRunnable)
-        handler.postDelayed(captureRunnable, tickMs)
+        if (failureLatch.disabled) return
+        try {
+            currentActivity = activity
+            scheduler.markDirty() // a new screen
+            observeDraws(activity.window.decorView)
+            handler.removeCallbacks(captureRunnable)
+            handler.postDelayed(captureRunnable, tickMs)
+        } catch (t: Throwable) {
+            Logger.d("ScreenshotCapture: cannot attach to ${activity.javaClass.simpleName}: ${t.message}")
+        }
     }
 
     override fun onActivityPaused(activity: Activity) {
@@ -127,23 +147,11 @@ internal class ScreenshotCapture(
         if (ReplayMasking.isSecureWindow(activity.window.attributes.flags)) return
 
         val rootView = activity.window.decorView.rootView
-        if (rootView.width == 0 || rootView.height == 0) return
+        // Drawn straight at the upload size (screenshotMaxWidth), not full size.
+        val size = ScreenshotSize.target(rootView.width, rootView.height, config.screenshotMaxWidth) ?: return
 
         // Asked last: a yes spends one unit of the per-minute budget.
         if (!scheduler.shouldCapture(sessionId() ?: "")) return
-
-        val bitmap = try {
-            val bmp = Bitmap.createBitmap(rootView.width, rootView.height, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(bmp)
-            rootView.draw(canvas)
-            bmp
-        } catch (e: Exception) {
-            Logger.w("ScreenshotCapture: bitmap capture failed: ${e.message}")
-            return
-        }
-
-        val currentOrdinal = ordinal++
-        val screenName = activity.javaClass.simpleName
 
         // The window in dp (logical px): the coordinate space taps are reported
         // in, for overlaying them on the frame. The image itself keeps its pixels.
@@ -152,26 +160,39 @@ internal class ScreenshotCapture(
         val viewportW = Dp.of(window.right - window.left, density)
         val viewportH = Dp.of(window.bottom - window.top, density)
 
-        // Collect rects on main thread — View access is only safe here.
-        // Private views and maskedViewIds are always masked; text, inputs and
-        // images follow maskAllText / maskInputs(InScreenshots) / maskImages.
-        val maskRects = try {
-            collectMaskRects(rootView)
-        } catch (e: Exception) {
-            // Never upload a frame whose masking failed.
-            Logger.w("ScreenshotCapture: masking failed, frame dropped: ${e.message}")
-            bitmap.recycle()
+        var bitmap: Bitmap? = null
+        try {
+            val bmp = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
+            bitmap = bmp
+            val canvas = Canvas(bmp)
+            if (size.scale < 1f) canvas.scale(size.scale, size.scale)
+            rootView.draw(canvas)
+
+            // Mask rects are in root-view pixels; the canvas is scaled to match.
+            // Private views and maskedViewIds are always masked; text, inputs and
+            // images follow maskAllText / maskInputs(InScreenshots) / maskImages.
+            // Painted here, on the main thread, so an unmasked frame never
+            // leaves it; if masking fails the frame is dropped.
+            val maskRects = collectMaskRects(rootView)
+            if (maskRects.isNotEmpty()) {
+                val paint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
+                for (rect in maskRects) canvas.drawRect(rect, paint)
+            }
+        } catch (t: Throwable) {
+            // Includes OutOfMemoryError: the frame is dropped, never the app.
+            bitmap?.recycle()
+            onCaptureFailure("capture", t)
             return
         }
+        val frame: Bitmap = bitmap ?: return
 
-        captureExecutor.execute {
+        val currentOrdinal = ordinal++
+        val screenName = activity.javaClass.simpleName
+
+        val encode = Runnable {
             try {
-                val masked = if (maskRects.isNotEmpty()) {
-                    applyMaskRects(bitmap, maskRects)
-                } else bitmap
-
-                val resized = resizeToMaxWidth(masked, config.screenshotMaxWidth)
-                val webpBytes = encodeWebP(resized, config.screenshotQuality)
+                if (failureLatch.disabled) return@Runnable
+                val webpBytes = encodeWebP(frame, config.screenshotQuality)
 
                 onScreenshot(
                     Screenshot(
@@ -183,11 +204,20 @@ internal class ScreenshotCapture(
                         imageBytes = webpBytes,
                     )
                 )
-            } catch (e: Exception) {
-                Logger.w("ScreenshotCapture: processing failed: ${e.message}")
+            } catch (t: Throwable) {
+                // Includes OutOfMemoryError while encoding: off the main thread,
+                // but an uncaught throwable here would still kill the process.
+                onCaptureFailure("encoding", t)
             } finally {
-                if (!bitmap.isRecycled) bitmap.recycle()
+                if (!frame.isRecycled) frame.recycle()
             }
+        }
+        try {
+            captureExecutor.execute(encode)
+        } catch (t: Throwable) {
+            // RejectedExecutionException: the frame is dropped.
+            frame.recycle()
+            onCaptureFailure("hand-off", t)
         }
     }
 
@@ -259,23 +289,8 @@ internal class ScreenshotCapture(
             }
     }
 
-    private fun applyMaskRects(bitmap: Bitmap, rects: List<Rect>): Bitmap {
-        val masked = bitmap.copy(bitmap.config ?: Bitmap.Config.ARGB_8888, true)
-        val canvas = Canvas(masked)
-        val paint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
-        for (rect in rects) canvas.drawRect(rect, paint)
-        return masked
-    }
-
-    private fun resizeToMaxWidth(bitmap: Bitmap, maxWidth: Int): Bitmap {
-        if (bitmap.width <= maxWidth) return bitmap
-        val ratio = maxWidth.toFloat() / bitmap.width
-        val newHeight = (bitmap.height * ratio).toInt()
-        return Bitmap.createScaledBitmap(bitmap, maxWidth, newHeight, true)
-    }
-
     private fun encodeWebP(bitmap: Bitmap, quality: Int): ByteArray {
-        val stream = ByteArrayOutputStream()
+        val stream = ByteArrayOutputStream(16 * 1024)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             bitmap.compress(Bitmap.CompressFormat.WEBP_LOSSY, quality, stream)
         } else {
@@ -294,5 +309,8 @@ internal class ScreenshotCapture(
     companion object {
         private const val MIN_TICK_MS = 250L
         private const val MAX_TICK_MS = 1_000L
+
+        /** Process-wide: after an OutOfMemoryError no capture instance takes screenshots again. */
+        internal val failureLatch = CaptureFailureLatch()
     }
 }
