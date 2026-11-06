@@ -8,7 +8,6 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.Window
 import android.widget.EditText
-import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.util.Logger
 
 internal class TouchTracker(
@@ -70,7 +69,12 @@ internal class TouchTracker(
 
         val touchedView = findViewAtPoint(activity, x, y)
 
-        if (touchedView?.javaClass?.isAnnotationPresent(UnilitixPrivate::class.java) == true) return
+        // A private view, or one inside a private view, is never recorded.
+        var v: View? = touchedView
+        while (v != null) {
+            if (PrivacyTags.isPrivate(v)) return
+            v = v.parent as? View
+        }
 
         if (touchedView != null) {
             if (maskedViewIds.contains(touchedView.id)) {

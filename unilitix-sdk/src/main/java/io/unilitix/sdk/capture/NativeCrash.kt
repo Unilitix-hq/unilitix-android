@@ -45,17 +45,16 @@ internal object NativeCrashRecord {
     fun signalName(signal: Int): String? = names[signal]
 
     /**
-     * The crash's fingerprint: `SIGNAL:<n>` for a signal (each signal its own
-     * group: `SIGNAL:11` is `8f1fc15bfa06be00` on every SDK), the bare type
-     * when the signal is unknown (as UnilitixCore does for a record without
-     * one), else the exception type and stack.
-     *
-     * A `SIGNAL` crash never includes its stack, even when it has one (the
-     * native backtrace, 1.10.0): grouping stays as it was, and the
-     * tombstone-format frames are not fingerprint frames on every SDK.
+     * The crash's fingerprint. A `SIGNAL` crash (contract 1.4.0) hashes
+     * `SIGNAL:<n>` (`SIGNAL` when the signal is unknown) and the first three
+     * frames of the backtrace that belong to the app's own libraries
+     * ([io.unilitix.sdk.core.NativeFrames]); with no backtrace, or only
+     * system frames, it is the 1.3 value (`SIGNAL:11` is `8f1fc15bfa06be00`
+     * on every SDK). Another exception type keeps the usual rule.
      */
     fun fingerprint(exceptionType: String, signal: Int?, stackTrace: String?): String = when {
-        exceptionType == SIGNAL_TYPE -> Fingerprint.of(if (signal != null) "$exceptionType:$signal" else exceptionType, null)
+        exceptionType == SIGNAL_TYPE || Fingerprint.isSignalType(exceptionType) ->
+            Fingerprint.native(Fingerprint.signalFingerprintType(exceptionType, signal), stackTrace ?: "")
         signal != null -> Fingerprint.of("$exceptionType:$signal", stackTrace)
         else -> Fingerprint.of(exceptionType, stackTrace)
     }
@@ -77,7 +76,7 @@ internal object NativeCrashRecord {
         stackTrace = stackTrace?.takeIf { it.isNotEmpty() }?.take(MAX_STACK),
         timestampMs = timestampMs?.takeIf { it > 0 },
         platform = PLATFORM,
-        fingerprint = fingerprint(SIGNAL_TYPE, signal, null)
+        fingerprint = fingerprint(SIGNAL_TYPE, signal, stackTrace?.take(MAX_STACK))
     )
 
     /**

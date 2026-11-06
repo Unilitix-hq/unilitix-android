@@ -1,78 +1,54 @@
 package io.unilitix.sdk
 
+import android.app.Activity
 import android.app.Application
-import kotlinx.coroutines.CoroutineExceptionHandler
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.view.View
-import io.unilitix.sdk.BuildConfig
-import io.unilitix.sdk.capture.Anr
-import io.unilitix.sdk.capture.AnrTrace
 import io.unilitix.sdk.capture.CrashHandler
-import io.unilitix.sdk.capture.NativeCrash
-import io.unilitix.sdk.capture.NativeCrashFile
-import io.unilitix.sdk.capture.NativeCrashRecord
-import io.unilitix.sdk.capture.NativeCrashReporter
 import io.unilitix.sdk.capture.NativeSignalHandler
-import io.unilitix.sdk.capture.ProcessExit
-import io.unilitix.sdk.capture.ProcessExits
-import io.unilitix.sdk.capture.PerformanceMonitor
-import io.unilitix.sdk.capture.RageTapDetector
-import io.unilitix.sdk.capture.ScreenTracker
-import io.unilitix.sdk.capture.ScreenshotCapture
-import io.unilitix.sdk.capture.SnapshotCapture
-import io.unilitix.sdk.capture.TouchTracker
-import io.unilitix.sdk.context.BatteryInfo
-import io.unilitix.sdk.context.NetworkMonitor
-import io.unilitix.sdk.context.collectDeviceInfo
-import io.unilitix.sdk.context.collectNetworkInfo
-import io.unilitix.sdk.core.Breadcrumbs
-import io.unilitix.sdk.core.ConsentController
-import io.unilitix.sdk.core.ConsentEffects
-import io.unilitix.sdk.core.ConsentStore
-import io.unilitix.sdk.core.SharedPreferencesStore
-import io.unilitix.sdk.core.ErrorReportLimiter
-import io.unilitix.sdk.core.EventBuffer
-import io.unilitix.sdk.core.Fingerprint
+import io.unilitix.sdk.capture.PrivacyTags
 import io.unilitix.sdk.core.GuardedInit
-import io.unilitix.sdk.core.Identity
-import io.unilitix.sdk.core.Session
-import io.unilitix.sdk.core.SessionHistory
-import io.unilitix.sdk.core.SessionManager
-import io.unilitix.sdk.core.SnapshotBuffer
-import io.unilitix.sdk.core.UnilitixEvent
-import io.unilitix.sdk.flush.FlushScheduler
-import io.unilitix.sdk.network.ApiClient
-import io.unilitix.sdk.network.UploadGate
-import io.unilitix.sdk.storage.EventDatabase
-import io.unilitix.sdk.storage.PendingEvent
+import io.unilitix.sdk.core.Screenshot
+import io.unilitix.sdk.engine.ErrorReport
+import io.unilitix.sdk.engine.UnilitixCore
+import io.unilitix.sdk.platform.ProcessGuard
 import io.unilitix.sdk.storage.PendingScreenshot
-import io.unilitix.sdk.storage.ScreenshotQueueCap
-import io.unilitix.sdk.util.Json
-import java.io.File
 import io.unilitix.sdk.util.Logger
-import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeoutOrNull
-import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
-import kotlin.random.Random
-import kotlin.math.roundToInt
+import org.json.JSONObject
 
+/**
+ * The Unilitix Android SDK. Every method is safe to call from any thread and
+ * never throws into the caller; calls made before [init] completes are
+ * buffered (up to 200, oldest dropped) and replayed once the first session has
+ * started.
+ */
 object Unilitix {
+
+    /** The engine entry point and its pre-init buffer: exists before [init]. */
+    internal val core = UnilitixCore()
 
     @Volatile
     internal var instance: UnilitixInternal? = null
+
+    /** Wrapper name/version set before [init] (applied to the User-Agent once it runs). */
+    @Volatile
+    internal var wrapperLabel: String? = null
+
+    /** [setExternalScreenCapture] before [init]. */
+    @Volatile
+    internal var externalCaptureRequested: Boolean = false
 
     /**
      * Initializes the SDK. Call once, in `Application.onCreate`.
      * Consent starts as the persisted decision, else
      * [UnilitixConfig.Builder.consent] (default [UnilitixConsent.GRANTED]).
+     *
+     * Only the crash handler is installed on the calling thread; storage,
+     * key store, database and native library loading happen on a background
+     * thread, and calls made meanwhile are buffered. In a multi-process app
+     * only the main process initialises; other processes ignore the call.
      */
     @JvmStatic
     @JvmOverloads
@@ -82,7 +58,7 @@ object Unilitix {
 
     /**
      * Initializes the SDK with an initial [consent] state, used only when the
-     * user has not decided on this device yet: a decision persisted by
+     * user has not decided yet on this device: a decision persisted by
      * [setConsent] (or [optOut] / [optIn]) on an earlier launch wins.
      *
      * ```kotlin
@@ -108,41 +84,52 @@ object Unilitix {
         consent: UnilitixConsent?,
         configure: UnilitixConfig.Builder.() -> Unit
     ) {
-        // Lifecycle observers and Activity callbacks must be registered on the
-        // main thread; a cross-platform bridge may call init from its own thread.
-        if (android.os.Looper.myLooper() != android.os.Looper.getMainLooper()) {
-            Logger.w("Unilitix.init() called off the main thread; initialising on the main thread")
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                initWith(application, apiKey, consent, configure)
+        try {
+            // Lifecycle observers and Activity callbacks must be registered on the
+            // main thread; a cross-platform bridge may call init from its own thread.
+            if (Looper.myLooper() != Looper.getMainLooper()) {
+                Logger.w("Unilitix.init() called off the main thread; initialising on the main thread")
+                Handler(Looper.getMainLooper()).post { initWith(application, apiKey, consent, configure) }
+                return
             }
-            return
+            if (instance != null) {
+                Logger.w("Unilitix.init() called more than once — ignoring")
+                return
+            }
+            if (!ProcessGuard.isMainProcess(application)) {
+                Logger.d("Unilitix.init() ignored in process ${ProcessGuard.currentProcessName(application)}: the SDK runs in the main process only")
+                return
+            }
+            val started = SystemClock.elapsedRealtime()
+            // Exception barrier (1.10.2): nothing below may throw into the host's
+            // Application.onCreate. On failure the SDK stays off and a later init can retry.
+            val internal = GuardedInit.run(
+                create = {
+                    val builder = UnilitixConfig.Builder().apply(configure)
+                    val initialConsent = consent ?: builder.consent
+                    val config = builder.build() // clamps out-of-range values
+                    Logger.configure(config.debugLogging)
+                    if (config.sessionTimeoutSeconds < 60) {
+                        Logger.w("Unilitix: sessionTimeoutSeconds=${config.sessionTimeoutSeconds} is very low — consider 1800 (30 min)")
+                    }
+                    UnilitixInternal(application, apiKey, config, initialConsent, core)
+                },
+                start = { it.startOnMainThread() },
+                teardown = { it.shutdown() }
+            ) ?: return
+            instance = internal
+            Logger.d("Unilitix SDK initialising | key=${Logger.keyLabel(apiKey)} | v${BuildConfig.SDK_VERSION} | main thread ${SystemClock.elapsedRealtime() - started} ms")
+        } catch (t: Throwable) {
+            Logger.w("Unilitix.init() failed: ${t.javaClass.simpleName}")
         }
-        if (instance != null) {
-            Logger.w("Unilitix.init() called more than once — ignoring")
-            return
+    }
+
+    private inline fun guard(what: String, block: () -> Unit) {
+        try {
+            block()
+        } catch (t: Throwable) {
+            Logger.w("Unilitix.$what failed: ${t.javaClass.simpleName}: ${t.message}")
         }
-        // Exception barrier (1.10.2): nothing below may throw into the host's
-        // Application.onCreate. On failure the SDK stays off (every public
-        // call is a no-op while `instance` is null) and a later init can retry.
-        val internal = GuardedInit.run(
-            create = {
-                val builder = UnilitixConfig.Builder().apply(configure)
-                val initialConsent = consent ?: builder.consent
-                val config = builder.build() // clamps out-of-range values
-                // Applies in release builds of the library too (it used to be gated on
-                // the library's own BuildConfig.DEBUG, which is false in the AAR).
-                Logger.configure(config.debugLogging)
-                if (config.sessionTimeoutSeconds < 60) {
-                    Logger.w("Unilitix: sessionTimeoutSeconds=${config.sessionTimeoutSeconds} is very low — consider 1800 (30 min) to avoid session fragmentation")
-                }
-                UnilitixInternal(application, apiKey, config, initialConsent)
-            },
-            start = { it.start() },
-            teardown = { it.shutdown() }
-        ) ?: return
-        // Published only once fully started: callers never see a half-started SDK.
-        instance = internal
-        Logger.d("✅ Unilitix SDK initialized | key=${Logger.keyLabel(apiKey)} | consent=${internal.consent.state.value} | session=${internal.sessionManager.currentSession?.id?.take(8)} | v${BuildConfig.SDK_VERSION}")
     }
 
     /**
@@ -152,7 +139,7 @@ object Unilitix {
      * Safe to call more than once; a no-op before init.
      */
     @JvmStatic
-    fun attachToActivity(activity: android.app.Activity) {
+    fun attachToActivity(activity: Activity) = guard("attachToActivity") {
         instance?.attachToActivity(activity)
     }
 
@@ -160,52 +147,49 @@ object Unilitix {
      * Decides, per uncaught JVM exception, whether the SDK records it (true) or
      * only passes it on to the next handler (false). For wrapper SDKs that
      * report a crash themselves before the platform re-throws it, such as React
-     * Native's fatal JS errors. The session is still marked crashed.
+     * Native's fatal JS errors.
      */
     @JvmStatic
     fun setCrashFilter(filter: ((Throwable) -> Boolean)?) {
-        io.unilitix.sdk.capture.CrashHandler.crashFilter = filter
-    }
-
-    @JvmStatic
-    fun identify(userId: String, traits: Map<String, Any> = emptyMap()) {
-        instance?.identity?.identify(userId, traits)
-    }
-
-    @JvmStatic
-    fun trackEvent(name: String, properties: Map<String, Any> = emptyMap()) {
-        val internal = instance ?: run {
-            Logger.w("Unilitix.trackEvent() called before init()")
-            return
-        }
-        if (internal.optedOut) return
-        if (!internal.shouldSample()) return
-
-        internal.scope.launch {
-            internal.emitEvent(UnilitixEvent(type = name, properties = properties))
-        }
-    }
-
-    @JvmStatic
-    fun trackScreen(screenName: String) {
-        val internal = instance ?: return
-        if (internal.optedOut) return
-
-        internal.scope.launch {
-            internal.emitEvent(UnilitixEvent(type = "NAVIGATE", screen = screenName))
-        }
+        CrashHandler.crashFilter = filter
     }
 
     /**
-     * Records an error the host app (or a bridge such as React Native) caught
-     * itself. [fatal] = false emits a non-fatal `EXCEPTION`; [fatal] = true
-     * emits a `CRASH`, marks the session crashed and persists it before
-     * returning (bounded to [FATAL_PERSIST_TIMEOUT_MS]), so a caller that is
+     * Links this device's anonymous id to your user id: sends
+     * `POST /v1/ingest/identify {anonymousId, customUserId, traits}` once
+     * (held while consent is pending), and later uploads carry the user id.
+     * Traits are normalised (depth 5, 100 keys, 1024-character strings,
+     * non-finite numbers become null) and are not stored on the device
+     * beyond the pending request.
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun identify(userId: String, traits: Map<String, Any?> = emptyMap()) = guard("identify") {
+        core.identify(userId, traits)
+    }
+
+    /** Records a custom event (`CUSTOM`, `metadata.name` = [name], normalised [properties]). */
+    @JvmStatic
+    @JvmOverloads
+    fun trackEvent(name: String, properties: Map<String, Any?> = emptyMap()) = guard("trackEvent") {
+        core.track(name, properties)
+    }
+
+    /** Records a screen view (`NAVIGATE`); a repeat of the current screen is ignored. */
+    @JvmStatic
+    fun trackScreen(screenName: String) = guard("trackScreen") {
+        core.screen(screenName)
+    }
+
+    /**
+     * Records an error the host app (or a bridge) caught itself. [fatal] =
+     * false emits a non-fatal `EXCEPTION`; [fatal] = true emits a `CRASH`,
+     * marks the session crashed and persists and uploads it before
+     * returning (bounded by the contract's 2 s budget), so a caller that is
      * about to let the process die can do so safely.
      *
-     * [platform] names where the error came from (`"android"`, `"js"`) and
-     * travels in the exception message prefix, as the Flutter SDK does for
-     * native crashes.
+     * [platform] names where the error came from (`"android"`, `"flutter"`,
+     * `"react-native"`); it is sent as `metadata.platform`.
      */
     @JvmStatic
     @JvmOverloads
@@ -215,14 +199,7 @@ object Unilitix {
         stackTrace: String,
         fatal: Boolean,
         platform: String = "android"
-    ) {
-        val internal = instance ?: run {
-            Logger.w("Unilitix.recordException() called before init()")
-            return
-        }
-        if (internal.optedOut) return
-        internal.recordException(type, message, stackTrace, fatal, platform)
-    }
+    ) = recordExternalError(type, message, stackTrace, fatal, platform, null, null)
 
     /**
      * Adds a breadcrumb to the trail attached to the next crash or exception
@@ -231,13 +208,11 @@ object Unilitix {
      */
     @JvmStatic
     @JvmOverloads
-    fun addBreadcrumb(message: String, category: String = "custom") {
-        val internal = instance ?: return
-        if (internal.optedOut) return
-        internal.breadcrumbs.add(category, internal.breadcrumbs.lastScreen(), message)
+    fun addBreadcrumb(message: String, category: String = "custom") = guard("addBreadcrumb") {
+        core.addBreadcrumb(message, category)
     }
 
-    /** True once [init] has run; bridges use it to decide whether to forward calls. */
+    /** True once [init] has run in this process (the SDK may still be finishing its start). */
     @JvmStatic
     val isInitialized: Boolean
         get() = instance != null
@@ -250,40 +225,32 @@ object Unilitix {
      *
      * For other Unilitix SDKs in the same app: the Unilitix Flutter plugin
      * (2.5.0+) checks it, without a compile-time dependency, and leaves native
-     * crashes to this SDK when it is true, so one native crash is reported
-     * once. Consent is not part of it: a denied user is not reported by
-     * either SDK's native capture here.
+     * crashes to this SDK when it is true, so one native crash is reported once.
      */
     @JvmStatic
-    fun nativeCrashCaptureActive(): Boolean = instance?.nativeCrashCaptureActive == true
-
-    internal const val FATAL_PERSIST_TIMEOUT_MS = 2_000L
-
-    @JvmStatic
-    fun startSession() {
-        instance?.sessionManager?.startNewSession()
+    fun nativeCrashCaptureActive(): Boolean = try {
+        instance?.nativeCrashCaptureActive == true
+    } catch (t: Throwable) {
+        false
     }
 
     @JvmStatic
-    fun endSession() {
-        instance?.sessionManager?.endCurrentSession()
-    }
+    fun startSession() = guard("startSession") { core.startNewSession() }
 
     @JvmStatic
-    fun flush() {
-        val internal = instance ?: return
-        internal.scope.launch {
-            internal.flushNow()
-        }
-    }
+    fun endSession() = guard("endSession") { core.endCurrentSession() }
+
+    /** Uploads queued events now, unless offline, paused, backing off or consent is not granted. */
+    @JvmStatic
+    fun flush() = guard("flush") { core.flush() }
 
     /**
-     * The current consent state. Before [init] this is
+     * The current consent state. Before [init] has finished this is
      * [UnilitixConsent.GRANTED] (the contract default).
      */
     @JvmStatic
     val consent: UnilitixConsent
-        get() = instance?.consent?.state ?: UnilitixConsent.GRANTED
+        get() = try { core.engine?.consentState() } catch (t: Throwable) { null } ?: UnilitixConsent.GRANTED
 
     /**
      * Records the user's consent decision (persisted across launches) and acts
@@ -293,51 +260,46 @@ object Unilitix {
      * * [UnilitixConsent.PENDING]: capture continues into the on-device queue;
      *   nothing is uploaded or deleted.
      * * [UnilitixConsent.DENIED]: capture stops and everything queued on the
-     *   device (events, snapshots, screenshots, pending crash) is deleted.
+     *   device (events, pending identify, snapshots, screenshots, crash files,
+     *   the install id) is deleted.
+     * Before [init] the call is buffered and applied when the SDK starts.
      */
     @JvmStatic
-    fun setConsent(consent: UnilitixConsent) {
-        val internal = instance ?: run {
-            Logger.w("Unilitix.setConsent() called before init() — ignoring; pass consent to init() instead")
-            return
-        }
-        val before = internal.consent.set(consent)
-        Logger.d("Unilitix: consent ${before.value} → ${consent.value} (persisted)")
+    fun setConsent(consent: UnilitixConsent) = guard("setConsent") {
+        core.setConsent(consent)
     }
 
     /** Stops all tracking and deletes queued data. Same as `setConsent(UnilitixConsent.DENIED)`. */
     @JvmStatic
-    fun optOut() {
-        setConsent(UnilitixConsent.DENIED)
-    }
+    fun optOut() = setConsent(UnilitixConsent.DENIED)
 
     /** Resumes tracking. Same as `setConsent(UnilitixConsent.GRANTED)`. */
     @JvmStatic
-    fun optIn() {
-        setConsent(UnilitixConsent.GRANTED)
-    }
+    fun optIn() = setConsent(UnilitixConsent.GRANTED)
 
     /**
      * Shows [view] and everything inside it in session replay even when
      * [UnilitixConfig.Builder.maskAllText] or [UnilitixConfig.Builder.maskImages]
-     * is on. Use it for content with no personal data that is needed to
-     * understand the screen: headings, button labels, navigation, static copy.
-     * Pass `false` to mask it again. Can be called before [init].
+     * is on. Pass `false` to mask it again. Can be called before [init].
      *
-     * It never overrides [UnilitixPrivate], `maskedViewIds` or input masking
-     * (`maskInputs`): an `EditText` inside an unmasked view is still masked.
-     *
-     * In layout XML, the same marker is a keyed tag:
-     * ```xml
-     * <TextView ...>
-     *     <tag android:id="@id/unilitix_unmasked" android:value="true" />
-     * </TextView>
-     * ```
+     * It never overrides [UnilitixPrivate], [mask], `maskedViewIds` or input
+     * masking: an `EditText` inside an unmasked view is still masked.
      */
     @JvmStatic
     @JvmOverloads
-    fun unmask(view: View, unmasked: Boolean = true) {
+    fun unmask(view: View, unmasked: Boolean = true) = guard("unmask") {
         view.setTag(R.id.unilitix_unmasked, if (unmasked) true else null)
+    }
+
+    /**
+     * Hides [view] and everything inside it in session replay and stops
+     * recording taps on it, like [UnilitixPrivate] on its class. Pass
+     * `false` to undo. Can be called before [init].
+     */
+    @JvmStatic
+    @JvmOverloads
+    fun mask(view: View, masked: Boolean = true) = guard("mask") {
+        PrivacyTags.mark(view, masked)
     }
 
     /** True when [view] itself carries the [unmask] marker (ancestors are checked by the walkers). */
@@ -346,805 +308,155 @@ object Unilitix {
         return tag == true || tag.toString().equals("true", ignoreCase = true)
     }
 
+    /**
+     * Forgets the user: what was captured so far is uploaded under the old
+     * identity first, then the anonymous id and install id are replaced, the
+     * user id and traits are dropped, and a new session starts.
+     */
     @JvmStatic
-    fun reset() {
-        val internal = instance ?: return
-        internal.identity.reset()
-        internal.sessionManager.endCurrentSession()
-        internal.sessionManager.startNewSession()
-        Logger.d("Unilitix: reset complete")
-    }
-}
+    fun reset() = guard("reset") { core.reset() }
 
-internal class UnilitixInternal(
-    private val application: Application,
-    private val apiKey: String,
-    internal val config: UnilitixConfig,
-    initialConsent: UnilitixConsent = UnilitixConsent.GRANTED
-) : ConsentEffects {
-    // An exception in SDK work (a full disk, a database error) must never reach
-    // the host app's uncaught-exception handler: it is logged and dropped here.
-    internal val scope = CoroutineScope(
-        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, t ->
-            Logger.e("Unilitix: background task failed: ${t.javaClass.simpleName}: ${t.message}")
-        }
-    )
+    // ── Wrapper SDKs (Flutter 3.0, React Native) ─────────────────────────
 
-    /** Activity callbacks the SDK registered, so a late init can attach them to the current Activity. */
-    private val lifecycleCallbacks = mutableListOf<Application.ActivityLifecycleCallbacks>()
-
-    private fun registerCallbacks(cb: Application.ActivityLifecycleCallbacks) {
-        lifecycleCallbacks += cb
-        application.registerActivityLifecycleCallbacks(cb)
+    /**
+     * Names the cross-platform SDK that wraps this one (for example
+     * `setWrapper("flutter", "3.0.0")`). Sent with every session as
+     * `sdkWrapper` / `sdkWrapperVersion` (also in `sessionData`) and in the
+     * User-Agent (`Unilitix-Android/1.11.0 (flutter/3.0.0)`). Call before
+     * [init] or right after it.
+     */
+    @JvmStatic
+    fun setWrapper(name: String, version: String) = guard("setWrapper") {
+        val label = "${name.trim().take(32)}/${version.trim().take(32)}"
+        wrapperLabel = label
+        instance?.setWrapperLabel(label)
+        core.setWrapper(name, version)
     }
 
     /**
-     * Replays created/started/resumed for an Activity that already existed when
-     * the SDK started (React Native and other late inits), so taps, screens and
-     * replay attach to it instead of waiting for the next Activity.
+     * An error raised in the wrapper's language (Dart, JavaScript).
+     * [fingerprint], when given, is used as is (the wrapper computed the
+     * contract fingerprint over its own stack); otherwise the SDK computes it
+     * from [type] and [stackTrace]. [metadata] is added to the event's
+     * `metadata` (normalised; `fingerprint` and `platform` are the SDK's).
+     * A [fatal] error is a `CRASH`: the session is marked crashed and the
+     * report is persisted and uploaded before this returns, within the
+     * contract's 2 s budget.
      */
-    internal fun attachToActivity(activity: android.app.Activity) {
-        if (activity.isFinishing) return
-        for (cb in lifecycleCallbacks.toList()) {
-            try {
-                cb.onActivityCreated(activity, null)
-                cb.onActivityStarted(activity)
-                cb.onActivityResumed(activity)
-            } catch (t: Throwable) {
-                Logger.e("Unilitix: attach to current activity failed: ${t.message}")
-            }
-        }
-    }
-
-    internal val identity = Identity(application)
-    internal val apiClient = ApiClient(config.apiUrl, apiKey)
-    internal val networkMonitor = NetworkMonitor(application)
-
-    private val database = EventDatabase.getInstance(application)
-    private val flushScheduler = FlushScheduler(application)
-    internal val breadcrumbs = Breadcrumbs()
-    private val performanceMonitor = PerformanceMonitor()
-    internal val batteryInfo = BatteryInfo(application)
-
-    private val prefs = application.getSharedPreferences("unilitix_prefs", android.content.Context.MODE_PRIVATE)
-
-    /** Consent state; persisted in unilitix_prefs (migrates the 1.5.0 `opt_out` flag). */
-    internal val consent = ConsentController(ConsentStore(SharedPreferencesStore(prefs)), initialConsent, this)
-
-    /** True when nothing may be captured (consent denied). */
-    internal val optedOut: Boolean
-        get() = !consent.canCapture
-
-    /** Serializes writes to the on-device queue with the consent purge. */
-    private val queueMutex = Mutex()
-
-    // In-memory until the next successful batch; bounded separately from the
-    // per-session cap so a long offline or consent-pending stretch cannot hold
-    // 1500 view trees in memory.
-    internal val snapshotBuffer = SnapshotBuffer(config.maxSnapshotsPerSession.coerceIn(1, SnapshotBuffer.MAX_HELD))
-
-    /** Backoff window and 401/403 latch shared by every uploader (contract "Upload and retry"). */
-    internal val uploadGate = UploadGate()
-
-    /** maxReportsPerFingerprint / maxErrorReportsPerSession; reset on every session start. */
-    internal val errorLimiter = ErrorReportLimiter()
-
-    /** Recent sessions, for attributing a native crash on the next launch. */
-    private val sessionHistory = SessionHistory(SharedPreferencesStore(prefs))
-
-    /** Where the native signal handler (API 21-29) writes: files/unilitix/native_crash.json. */
-    private val nativeCrashFile = NativeCrashFile.locate(application.filesDir)
-
-    /**
-     * Completed once native crashes of earlier processes are in the queue:
-     * flushNow waits for it, so they go before this session's events.
-     */
-    private val nativeCrashesQueued = CompletableDeferred<Unit>()
-
-    private var snapshotCapture: SnapshotCapture? = null
-    private var screenshotCapture: ScreenshotCapture? = null
-    private var crashHandler: CrashHandler? = null
-
-    /** See [Unilitix.nativeCrashCaptureActive]; set once in [start]. */
-    @Volatile
-    internal var nativeCrashCaptureActive: Boolean = false
-        private set
-
-    internal val sessionManager = SessionManager(
-        sessionTimeoutSeconds = config.sessionTimeoutSeconds,
-        onSessionStart = { session ->
-            Logger.d("✅ Session started | id=${session.id}")
-            if (consent.canCapture) sessionHistory.recordStart(session.id, session.startedAt)
-            screenshotCapture?.resetOrdinal()
-            snapshotCapture?.resetSession()
-            errorLimiter.resetSession()
-            // frame_drops counts this session's janky frames, not the process's.
-            performanceMonitor.resetFrameDrops()
-        },
-        onSessionEnd = { session ->
-            Logger.d("Session ended: ${session.id}")
-            scope.launch { flushNow(session) }
-        }
-    )
-
-    private val eventBuffer = EventBuffer(
-        flushBatchSize = config.flushBatchSize,
-        onFlushNeeded = { flushNow() }
-    )
-
-    private val scheduler = Executors.newSingleThreadScheduledExecutor { r ->
-        Thread(r, "unilitix-scheduler").also { it.isDaemon = true }
-    }
-
-    fun start() {
-        if (config.autoTrackScreens) {
-            registerCallbacks(
-                ScreenTracker { screenName ->
-                    scope.launch { emitEvent(UnilitixEvent(type = "NAVIGATE", screen = screenName)) }
-                }
-            )
-        }
-
-        if (config.autoTrackTaps) {
-            val rageTapDetector = if (config.autoTrackRageTaps) {
-                RageTapDetector { screen, cx, cy ->
-                    // Cluster centre, rounded to whole logical px like TAP.
-                    val x = cx.roundToInt()
-                    val y = cy.roundToInt()
-                    scope.launch {
-                        emitEvent(
-                            UnilitixEvent(
-                                type = "RAGE_TAP",
-                                screen = screen,
-                                properties = mapOf("x" to x, "y" to y)
-                            )
-                        )
-                    }
-                    Logger.d("RageTap detected on $screen at ($x, $y)")
-                }
-            } else null
-
-            registerCallbacks(
-                TouchTracker(
-                    maskInputs = config.maskInputs,
-                    maskedViewIds = config.maskedViewIds
-                ) { screen, x, y, viewId ->
-                    val isRage = rageTapDetector?.recordTap(x.toFloat(), y.toFloat(), screen) ?: false
-                    if (!isRage) {
-                        scope.launch {
-                            emitEvent(
-                                UnilitixEvent(
-                                    type = "TAP",
-                                    screen = screen,
-                                    properties = mapOf("x" to x, "y" to y, "view" to viewId)
-                                )
-                            )
-                        }
-                    }
-                    true
-                }
-            )
-        }
-
-        // Before any handler of this process can write a new one: the record an
-        // earlier process left (API 21-29), read and deleted exactly once.
-        val nativeRecord = NativeCrashFile.consume(nativeCrashFile)
-
-        if (config.autoTrackCrashes) {
-            crashHandler = CrashHandler(
-                context = application,
-                breadcrumbs = breadcrumbs,
-                database = database,
-                getCurrentSessionJson = { buildSessionJson(sessionManager.currentSession) },
-                onCrash = { sessionManager.markCrashed() },
-                isEnabled = { consent.canCapture },
-                admitReport = { fingerprint -> errorLimiter.admit(fingerprint) != null }
-            ).also { it.install() }
-            // API 21-29 only; API 30+ reads ApplicationExitInfo instead.
-            val handlerInstalled = NativeSignalHandler.install(nativeCrashFile)
-            nativeCrashCaptureActive = handlerInstalled ||
-                android.os.Build.VERSION.SDK_INT > NativeSignalHandler.LAST_API_LEVEL
-        }
-
-        recoverPendingCrash()
-
-        scope.launch {
-            try {
-                reportNativeCrashes(nativeRecord)
-            } catch (e: Exception) {
-                Logger.w("Unilitix: native crash report failed: ${e.message}")
-            } finally {
-                nativeCrashesQueued.complete(Unit)
-            }
-        }
-
-        if (config.captureSnapshots) {
-            snapshotCapture = SnapshotCapture(
-                config,
-                isEnabled = { consent.canCapture },
-                sessionId = { sessionManager.currentSession?.id }
-            ) { snapshot ->
-                if (consent.canCapture) snapshotBuffer.add(snapshot)
-            }
-            registerCallbacks(snapshotCapture!!)
-        }
-
-        if (config.captureScreenshots) {
-            screenshotCapture = ScreenshotCapture(
-                config,
-                isEnabled = { consent.canCapture },
-                sessionId = { sessionManager.currentSession?.id }
-            ) { screenshot ->
-                scope.launch {
-                    val sessionId = sessionManager.currentSession?.id?.toString() ?: return@launch
-                    queueMutex.withLock {
-                        if (!consent.canCapture) return@withLock
-                        database.screenshotDao().insert(
-                            PendingScreenshot(
-                                sessionId = sessionId,
-                                ordinal = screenshot.ordinal,
-                                screenName = screenshot.screenName,
-                                viewportWidth = screenshot.viewportWidth,
-                                viewportHeight = screenshot.viewportHeight,
-                                capturedAt = screenshot.capturedAt,
-                                imageBytes = screenshot.imageBytes,
-                            )
-                        )
-                        // Bound the on-device queue by count and bytes, oldest first:
-                        // frames can wait for Wi-Fi across many sessions.
-                        val evict = ScreenshotQueueCap.idsToEvict(
-                            database.screenshotDao().sizesNewestFirst(),
-                            maxCount = config.maxScreenshotsPerSession
-                        )
-                        if (evict.isNotEmpty()) {
-                            evict.chunked(500).forEach { database.screenshotDao().deleteByIds(it) }
-                            Logger.d("Unilitix: screenshot queue full, dropped ${evict.size} oldest")
-                        }
-                    }
-                }
-            }
-            registerCallbacks(screenshotCapture!!)
-        }
-
-        if (!consent.canCapture) batteryInfo.stopObserving()
-
-        // Frame-drop tracking runs only while an activity is resumed (1.10.2).
-        registerCallbacks(performanceMonitor)
-
-        // Never fatal: without the callback, transitions are not counted but
-        // every event still reads the current network type when it is captured.
-        networkMonitor.observeNetworkTransitions { newType ->
-            scope.launch { sessionManager.onNetworkTypeChanged(newType) }
-        }
-
-        // config.flushIntervalSeconds is clamped to >= 1 by build(); a period
-        // <= 0 made scheduleAtFixedRate throw out of init before 1.10.2.
-        val flushPeriod = config.flushIntervalSeconds.toLong().coerceAtLeast(1L)
-        scheduler.scheduleAtFixedRate(
-            { scope.launch { flushNow() } },
-            flushPeriod,
-            flushPeriod,
-            TimeUnit.SECONDS
-        )
-
-        scheduler.scheduleAtFixedRate(
-            {
-                // An exception would cancel the repeating task silently; keep sampling.
-                try { performanceMonitor.sampleCpu() } catch (_: Throwable) {}
-            },
-            5L, 5L, TimeUnit.SECONDS
-        )
-
-        Logger.d("UnilitixInternal: started")
-    }
-
-    /**
-     * Undoes what [start] registered, after it failed part way (see
-     * [GuardedInit]). Best effort: each step is independent and none throws.
-     * Not a public "stop the SDK" API.
-     */
-    internal fun shutdown() {
-        fun step(name: String, block: () -> Unit) {
-            try { block() } catch (t: Throwable) { Logger.d("Unilitix: shutdown step $name failed: ${t.message}") }
-        }
-        step("activity callbacks") {
-            for (cb in lifecycleCallbacks.toList()) {
-                try { application.unregisterActivityLifecycleCallbacks(cb) } catch (_: Throwable) {}
-            }
-            lifecycleCallbacks.clear()
-        }
-        step("performance monitor") { performanceMonitor.stop() }
-        step("network callback") { networkMonitor.stopObserving() }
-        step("battery receiver") { batteryInfo.stopObserving() }
-        step("scheduler") { scheduler.shutdownNow() }
-        step("session observer") {
-            androidx.lifecycle.ProcessLifecycleOwner.get().lifecycle.removeObserver(sessionManager)
-        }
-        step("crash handler") { crashHandler?.uninstall() }
-        crashHandler = null
-        step("scope") { scope.cancel() }
-    }
-
-    private fun recoverPendingCrash() {
-        scope.launch {
-            val file = File(application.cacheDir, "unilitix_crash_pending.json")
-            if (!file.exists()) return@launch
-            if (!consent.canCapture) {
-                file.delete()
-                return@launch
-            }
-            try {
-                val obj = org.json.JSONObject(file.readText())
-                database.eventDao().insert(
-                    PendingEvent(
-                        sessionJson = obj.optString("sessionJson", "{}"),
-                        eventsJson  = obj.optString("eventsJson", "[]")
-                    )
-                )
-                file.delete()
-                Logger.d("Unilitix: recovered pending crash report from disk")
-            } catch (e: Exception) {
-                Logger.w("Unilitix: failed to recover pending crash: ${e.message}")
-            }
-        }
-    }
-
-    /**
-     * Reports native crashes of earlier processes (UnilitixCore 0.5.0
-     * behaviour): the record the signal handler left (API 21-29) and, on
-     * API 30+, `REASON_CRASH_NATIVE` exits newer than the stored watermark.
-     * Each goes to the session that was running when the process died
-     * (marked crashed, ended at the crash), or to the current session when
-     * none matches. Denied consent drops them; pending holds them on the
-     * device. Runs before this session's first batch is persisted.
-     *
-     * From 1.9.0 the same scan reports `REASON_ANR` exits as ANR events
-     * ([reportAnrs]).
-     */
-    private suspend fun reportNativeCrashes(record: String?) {
-        val crashes = mutableListOf<NativeCrash>()
-        if (record != null) {
-            val parsed = NativeCrashRecord.parse(record)
-            if (parsed != null) crashes.add(parsed)
-            else Logger.w("Unilitix: native crash record could not be read; dropped")
-        }
-        var anrs = emptyList<Anr>()
-        if (android.os.Build.VERSION.SDK_INT >= 30) {
-            // Always scanned, so the watermark moves even when nothing is reported.
-            val exits = readProcessExits()
-            val scan = ProcessExits.scan(SharedPreferencesStore(prefs), exits, System.currentTimeMillis())
-            crashes += scan.crashes
-            anrs = scan.anrs
-        }
-        if (!config.autoTrackCrashes) return
-        if (anrs.isNotEmpty()) reportAnrs(anrs)
-        if (crashes.isEmpty()) return
-
-        val placements = NativeCrashReporter(sessionHistory)
-            .place(crashes, consent.state, sessionManager.currentSession?.id)
-        if (placements.isEmpty()) {
-            Logger.d("Unilitix: ${crashes.size} native crash(es) from an earlier launch dropped (consent denied)")
-            return
-        }
-        val now = System.currentTimeMillis()
-        val persisted = queueMutex.withLock {
-            if (!consent.canCapture) return@withLock false
-            for (p in placements) {
-                val event = NativeCrashRecord.toEvent(p.crash, now, ::isoTimestamp)
-                val sessionJson = if (p.session != null) {
-                    Logger.d("Unilitix: native crash ${p.crash.fingerprint} reported against session ${p.session.id.take(8)}")
-                    crashedSessionJson(p.session, p.crash.timestampMs)
-                } else {
-                    Logger.d("Unilitix: native crash ${p.crash.fingerprint}: no stored session matches; reported in the current one")
-                    sessionManager.markCrashed()
-                    buildSessionJson(sessionManager.currentSession)
-                }
-                database.eventDao().insert(
-                    PendingEvent(sessionJson = sessionJson, eventsJson = Json.toJson(listOf(event)))
-                )
-            }
-            true
-        }
-        if (persisted && consent.canUpload && !uploadGate.isPaused) flushScheduler.scheduleFlush()
-    }
-
-    /**
-     * ANRs of earlier processes (1.9.0): each goes to the session that was
-     * running when the process was killed, which ends then but is not marked
-     * crashed (an ANR is not a crash), or to the current session when none
-     * matches. Consent applies as for native crashes.
-     */
-    private suspend fun reportAnrs(anrs: List<Anr>) {
-        val placements = NativeCrashReporter(sessionHistory)
-            .placeAnrs(anrs, consent.state, sessionManager.currentSession?.id)
-        if (placements.isEmpty()) {
-            Logger.d("Unilitix: ${anrs.size} ANR(s) from an earlier launch dropped (consent denied)")
-            return
-        }
-        val now = System.currentTimeMillis()
-        val persisted = queueMutex.withLock {
-            if (!consent.canCapture) return@withLock false
-            for (p in placements) {
-                val event = AnrTrace.toEvent(p.anr, now, ::isoTimestamp)
-                val sessionJson = if (p.session != null) {
-                    Logger.d("Unilitix: ANR ${p.anr.fingerprint} reported against session ${p.session.id.take(8)}")
-                    endedSessionJson(p.session, p.anr.timestampMs)
-                } else {
-                    Logger.d("Unilitix: ANR ${p.anr.fingerprint}: no stored session matches; reported in the current one")
-                    buildSessionJson(sessionManager.currentSession)
-                }
-                database.eventDao().insert(
-                    PendingEvent(sessionJson = sessionJson, eventsJson = Json.toJson(listOf(event)))
-                )
-            }
-            true
-        }
-        if (persisted && consent.canUpload && !uploadGate.isPaused) flushScheduler.scheduleFlush()
-    }
-
-    /** The ANR session's record: its duration ending when the process was killed; `crashed` untouched. */
-    private fun endedSessionJson(entry: SessionHistory.Entry, endedAtMs: Long?): String {
-        val base = entry.sessionJson
-            ?: buildSessionJson(Session(id = entry.id, startedAt = entry.startedAt))
-        return try {
-            val obj = org.json.JSONObject(base)
-            val endedAt = SessionHistory.endedAt(entry, endedAtMs)
-            obj.put("endedAt", isoTimestamp(endedAt))
-            obj.put("durationMs", (endedAt - entry.startedAt).coerceAtLeast(0L))
-            obj.toString()
-        } catch (e: Exception) {
-            base
-        }
-    }
-
-    /** The crashed session's record: `crashed`, and its duration ending at the crash. */
-    private fun crashedSessionJson(entry: SessionHistory.Entry, crashedAt: Long?): String {
-        val base = entry.sessionJson
-            ?: buildSessionJson(Session(id = entry.id, startedAt = entry.startedAt))
-        return try {
-            val obj = org.json.JSONObject(base)
-            val endedAt = SessionHistory.endedAt(entry, crashedAt)
-            obj.put("crashed", true)
-            obj.put("endedAt", isoTimestamp(endedAt))
-            obj.put("durationMs", (endedAt - entry.startedAt).coerceAtLeast(0L))
-            obj.toString()
-        } catch (e: Exception) {
-            base
-        }
-    }
-
-    @androidx.annotation.RequiresApi(30)
-    private fun readProcessExits(): List<ProcessExit> {
-        return try {
-            val am = application.getSystemService(android.app.ActivityManager::class.java) ?: return emptyList()
-            am.getHistoricalProcessExitReasons(application.packageName, 0, ProcessExits.MAX_QUERIED).map { info ->
-                ProcessExit(
-                    reason = info.reason,
-                    timestampMs = info.timestamp,
-                    pid = info.pid,
-                    description = info.description,
-                    importance = info.importance,
-                    readTrace = {
-                        // Native crashes carry the tombstone (protobuf) from API 31;
-                        // ANRs the text thread dump from API 30.
-                        when (info.reason) {
-                            ProcessExits.REASON_CRASH_NATIVE ->
-                                info.traceInputStream?.use { readPrefix(it, MAX_TRACE_BYTES) }
-                            ProcessExits.REASON_ANR ->
-                                info.traceInputStream?.use { readPrefix(it, AnrTrace.MAX_TRACE_BYTES) }
-                            else -> null
-                        }
-                    }
-                )
-            }
-        } catch (e: Exception) {
-            Logger.w("Unilitix: could not read process exit reasons: ${e.message}")
-            emptyList()
-        }
-    }
-
-    private fun readPrefix(input: java.io.InputStream, max: Int): ByteArray {
-        val out = java.io.ByteArrayOutputStream()
-        val buf = ByteArray(8 * 1024)
-        while (out.size() < max) {
-            val n = input.read(buf, 0, minOf(buf.size, max - out.size()))
-            if (n < 0) break
-            out.write(buf, 0, n)
-        }
-        return out.toByteArray()
-    }
-
-    /** See [Unilitix.recordException]. */
-    internal fun recordException(
+    @JvmStatic
+    @JvmOverloads
+    fun recordExternalError(
         type: String,
         message: String,
-        stackTrace: String,
+        stackTrace: String?,
         fatal: Boolean,
-        platform: String
-    ) {
-        val fingerprint = Fingerprint.of(type, stackTrace)
-        if (errorLimiter.admit(fingerprint) == null) {
-            // Same error reported maxReportsPerFingerprint times this session
-            // (or the session's error budget is spent): counted, not sent.
-            Logger.d("Unilitix: repeat ${if (fatal) "CRASH" else "EXCEPTION"} $fingerprint suppressed (per-session cap)")
-            if (fatal) {
-                sessionManager.markCrashed()
-                NativeSignalHandler.markExceptionHandled()
-            }
-            return
-        }
-        val title = "$type: $message".take(200)
-        val props = mapOf<String, Any>(
-            "exception_type" to type,
-            "exception_message" to "[$platform] $message",
-            "stack_trace" to stackTrace.take(16_000),
-            "breadcrumbs" to breadcrumbs.toWire(),
-            "fatal" to fatal,
-            "title" to title,
-            "fingerprint" to fingerprint
-        )
-        val event = UnilitixEvent(
-            type = if (fatal) "CRASH" else "EXCEPTION",
-            screen = breadcrumbs.lastScreen(),
-            properties = props
+        platform: String,
+        fingerprint: String? = null,
+        metadata: Map<String, Any?>? = null
+    ) = guard("recordExternalError") {
+        val report = ErrorReport(
+            type = type,
+            message = message,
+            stackTrace = stackTrace ?: "",
+            fatal = fatal,
+            platform = platform,
+            fingerprint = fingerprint?.takeIf { it.isNotBlank() },
+            metadata = metadata,
         )
         if (!fatal) {
-            scope.launch { emitEvent(event) }
-            return
+            core.recordError(report)
+            return@guard
         }
-        sessionManager.markCrashed()
         // A SIGABRT that follows (the bridge aborting) is this crash, not a new one.
         NativeSignalHandler.markExceptionHandled()
-        // The caller is about to hand the error to a handler that kills the
-        // process: get the report into the on-device queue first, bounded so
-        // a stuck disk cannot hold the crash open.
-        val persisted = runBlocking {
-            withTimeoutOrNull(Unilitix.FATAL_PERSIST_TIMEOUT_MS) {
-                emitEvent(event)
-                flushNow()
-                true
-            }
-        }
-        if (persisted != true) Logger.w("Unilitix: fatal report not persisted within budget")
-    }
-
-    internal suspend fun emitEvent(event: UnilitixEvent) {
-        if (optedOut) return
-        val networkType = networkMonitor.currentType()
-        val isOffline = networkType == "OFFLINE"
-        val enriched = enrichEvent(event).copy(
-            capturedOffline = isOffline,
-            networkAtCapture = networkType
-        )
-        breadcrumbs.add(enriched.type, enriched.screen)
-        val session = sessionManager.currentSession
-        if (session != null) {
-            if (isOffline) session.offlineEventCount++ else session.onlineEventCount++
-        }
-        eventBuffer.emit(enriched)
-    }
-
-    internal suspend fun flushNow(session: Session? = null) {
-        try {
-            flushNowUnsafe(session)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (t: Throwable) {
-            // Storage failures (disk full, corrupt or downgraded database) cost
-            // this batch, never the host app.
-            Logger.e("Unilitix: could not persist events: ${t.javaClass.simpleName}: ${t.message}")
+        if (!core.recordFatal(report, CrashHandler.FATAL_FLUSH_BUDGET_MS) && core.isStarted) {
+            Logger.w("Unilitix: fatal report not persisted within budget")
         }
     }
 
-    private suspend fun flushNowUnsafe(session: Session? = null) {
-        // Native crashes of earlier processes are queued first (bounded wait).
-        if (!nativeCrashesQueued.isCompleted) {
-            withTimeoutOrNull(NATIVE_CRASH_WAIT_MS) { nativeCrashesQueued.await() }
+    /**
+     * A JPEG frame the wrapper captured (already masked by it) for session
+     * replay. It goes through the SDK's own screenshot pipeline: dropped
+     * unless consent allows capture and this session is sampled for replay,
+     * counted against `maxScreenshotsPerSession` and `maxScreenshotsPerMinute`,
+     * stored on the device and uploaded with the session's other frames
+     * (on Wi-Fi only when `uploadScreenshotsOnWifiOnly`). [width] and
+     * [height] are the frame's viewport in logical pixels; [timestampMs] the
+     * capture time (ms since 1970); [screen] the route name.
+     */
+    @JvmStatic
+    fun captureExternalScreenshot(image: ByteArray, width: Int, height: Int, timestampMs: Long, screen: String?) =
+        guard("captureExternalScreenshot") {
+            instance?.addExternalScreenshot(image, width, height, timestampMs, screen)
         }
-        val events = eventBuffer.drain()
-        if (!consent.canCapture) return // denied: drop whatever was buffered
-        if (events.isEmpty() && session == null) return
 
-        val activeSession = session ?: sessionManager.currentSession ?: return
+    /**
+     * A wireframe snapshot from the wrapper, in the contract's snapshot JSON
+     * shape (`{capturedAt, screenName, viewportWidth, viewportHeight,
+     * hierarchy}`; `capturedAt` RFC 3339 or ms since 1970; any `ordinal` is
+     * replaced by the SDK's). Same gates and caps as the SDK's own snapshots.
+     */
+    @JvmStatic
+    fun addExternalSnapshot(json: String) = guard("addExternalSnapshot") {
+        instance?.addExternalSnapshot(json)
+    }
 
-        val sessionJson = buildSessionJson(activeSession)
-        val eventsJson = Json.toJson(events.map { eventToMap(it) })
+    /**
+     * True while the wrapper supplies replay frames and snapshots: the SDK's
+     * own view-based screenshot and snapshot capture stands down (a Flutter
+     * or React Native screen is one native view, so the wrapper captures it
+     * better). False gives capture back to the SDK.
+     */
+    @JvmStatic
+    fun setExternalScreenCapture(enabled: Boolean) = guard("setExternalScreenCapture") {
+        externalCaptureRequested = enabled
+        instance?.replayState?.externalCapture = enabled
+    }
 
-        val batchNetwork = networkMonitor.currentType()
-        val persisted = queueMutex.withLock {
-            // Re-checked under the lock: a denial purges under the same lock.
-            if (!consent.canCapture) return@withLock false
-            val count = database.eventDao().count()
-            if (count >= config.maxOfflineEvents) {
-                val overflow = count - config.maxOfflineEvents + 1
-                database.eventDao().deleteOldest(overflow)
-                Logger.w("Unilitix: event DB overflow, dropped $overflow oldest events")
-            }
-            database.eventDao().insert(
-                PendingEvent(
-                    sessionJson = sessionJson,
-                    eventsJson = eventsJson,
-                    capturedOffline = events.any { it.capturedOffline },
-                    networkAtCapture = batchNetwork
-                )
-            )
-            sessionHistory.recordBatch(activeSession.id, activeSession.startedAt, sessionJson, System.currentTimeMillis())
-            true
+    /**
+     * A tap from the wrapper's own gesture layer (Flutter and React Native
+     * draw into one native view, so the SDK's TouchTracker cannot see their
+     * widgets). [type] is `TAP` or `RAGE_TAP` (anything else is ignored);
+     * [x]/[y] are logical pixels, or null inside a private area so no
+     * position is sent. The current screen is stamped by the SDK.
+     */
+    @JvmStatic
+    fun recordExternalInteraction(type: String, x: Double?, y: Double?) = guard("recordExternalInteraction") {
+        if (type != "TAP" && type != "RAGE_TAP") return@guard
+        val fields = LinkedHashMap<String, Any?>()
+        if (x != null && y != null && x.isFinite() && y.isFinite()) {
+            fields["x"] = Math.round(x).toDouble()
+            fields["y"] = Math.round(y).toDouble()
         }
-        if (!persisted) return
-
-        // While consent is pending the batch stays queued; releaseHeld()
-        // schedules the upload once consent is granted.
-        // While a backoff window is open a delayed flush is already queued; after
-        // a 401/403 nothing is sent until the next launch. The batch stays queued.
-        if (consent.canUpload && !uploadGate.isPaused) flushScheduler.scheduleFlush()
-        Logger.d("Unilitix: persisted ${events.size} events for session ${activeSession.id}")
+        core.recordInteraction(type, fields)
     }
 
-    // ── ConsentEffects ────────────────────────────────────────────────
+    /** The current session's id, or null before the SDK has started (or between sessions). */
+    @JvmStatic
+    fun currentSessionId(): String? = try { core.engine?.currentSessionId() } catch (t: Throwable) { null }
 
-    override fun startCapture() {
-        batteryInfo.startObserving()
-    }
+    /** Whether the current session was sampled for session replay (`sampleRate`). */
+    @JvmStatic
+    fun isReplaySampled(): Boolean = try { core.engine?.isReplaySampled() == true } catch (t: Throwable) { false }
 
-    override fun stopCapture() {
-        batteryInfo.stopObserving()
-    }
-
-    override fun purgeLocalData() {
-        breadcrumbs.clear()
-        snapshotBuffer.drain()
-        flushScheduler.cancelPending()
-        scope.launch {
-            eventBuffer.drain()
-            queueMutex.withLock {
-                try {
-                    database.eventDao().deleteAll()
-                    database.screenshotDao().deleteAll()
-                    File(application.cacheDir, "unilitix_crash_pending.json").delete()
-                    nativeCrashFile.delete()
-                    sessionHistory.clear()
-                    Logger.d("Unilitix: consent denied — on-device queue purged")
-                } catch (e: Exception) {
-                    Logger.w("Unilitix: failed to purge on-device queue: ${e.message}")
-                }
-            }
-        }
-    }
-
-    override fun releaseHeld() {
-        scope.launch {
-            flushNow()
-            if (!uploadGate.isPaused) flushScheduler.scheduleFlush()
-        }
-    }
-
-    private companion object {
-        /**
-         * Cap on reading a native crash's tombstone: signal_info is near the
-         * start, the threads (with the crashing thread's backtrace) follow;
-         * memory maps and logs come after them and are not needed.
-         */
-        const val MAX_TRACE_BYTES = 1024 * 1024
-        /** How long a flush waits for earlier native crashes to be queued. */
-        const val NATIVE_CRASH_WAIT_MS = 5_000L
-    }
-
-    fun shouldSample(): Boolean {
-        return config.sampleRate >= 1.0 || Random.nextDouble() < config.sampleRate
-    }
-
-    private fun enrichEvent(event: UnilitixEvent): UnilitixEvent {
-        val perfProps = mapOf(
-            "memory_usage_mb" to performanceMonitor.memoryUsageMb,
-            "cpu_usage_pct" to performanceMonitor.cpuUsagePct,
-            "frame_drops" to performanceMonitor.frameDropCount
-        )
-        return event.copy(properties = perfProps + event.properties)
-    }
-
-    internal fun buildSessionJson(session: Session?): String {
-        if (session == null) return "{}"
-
-        val deviceInfo = collectDeviceInfo(application)
-        val networkInfo = collectNetworkInfo(application)
-        val battery = batteryInfo.getBatteryLevel().let { if (it >= 0) it.toDouble() else null }
-
-        // Flat structure matching IngestSession in the backend
-        val sessionMap = mutableMapOf<String, Any?>(
-            "anonymousId"     to identity.anonymousId,
-            "userId"          to (identity.userId ?: ""),
-            "customUserId"    to (identity.userId ?: ""),
-            "deviceType"      to "phone",
-            "manufacturer"    to deviceInfo.manufacturer,
-            "deviceModel"     to deviceInfo.model,
-            "os"              to deviceInfo.os,
-            "osVersion"       to deviceInfo.osVersion,
-            "screenWidth"     to deviceInfo.screenWidth,
-            "screenHeight"    to deviceInfo.screenHeight,
-            "screenDensity"   to deviceInfo.screenDensity.toDouble(),
-            "appVersion"      to deviceInfo.appVersion,
-            "buildNumber"     to deviceInfo.buildNumber,
-            "packageName"     to deviceInfo.packageName,
-            "sdkVersion"      to deviceInfo.sdkVersion,
-            "networkType"     to when (networkInfo.connectionType) {
-                "NONE", "UNKNOWN", "ETHERNET", "" -> "OFFLINE"
-                else -> networkInfo.connectionType
-            },
-            "carrierName"     to (networkInfo.carrier ?: ""),
-            "orientation"     to deviceInfo.orientation,
-            "locale"          to deviceInfo.locale,
-            "timezone"        to deviceInfo.timezone,
-            "country"         to "",
-            "city"            to "",
-            "installId"       to deviceInfo.installId,
-            "totalStorageGb"  to deviceInfo.totalStorageGb,
-            "batteryLevel"    to battery,
-            "startedAt"       to isoTimestamp(session.startedAt),
-            "endedAt"         to isoTimestamp(System.currentTimeMillis()),
-            "durationMs"      to (System.currentTimeMillis() - session.startedAt),
-            "foregroundTimeMs" to session.foregroundTimeMs.toInt(),
-            "backgroundTimeMs" to session.backgroundTimeMs.toInt(),
-            "crashed"         to session.crashed,
-            "capturedOffline"    to (session.offlineEventCount > 0),
-            "offlineEventCount"  to session.offlineEventCount,
-            "onlineEventCount"   to session.onlineEventCount,
-            "networkTransitions" to session.networkTransitions,
-            "sessionId"    to session.id.toString()
-            // syncAttempts / syncFailedBatches are injected by FlushWorker at upload time
+    /** For [UnilitixInternal]: a frame or snapshot from a wrapper. */
+    internal fun externalScreenshotOf(image: ByteArray, width: Int, height: Int, timestampMs: Long, screen: String?, ordinal: Int) =
+        Screenshot(
+            ordinal = ordinal,
+            capturedAt = if (timestampMs > 0) timestampMs else System.currentTimeMillis(),
+            screenName = screen?.take(256) ?: "",
+            viewportWidth = width.coerceAtLeast(0),
+            viewportHeight = height.coerceAtLeast(0),
+            imageBytes = image,
         )
 
-        identity.userTraits?.let { sessionMap["sessionData"] = it }
+    internal const val EXTERNAL_FORMAT = PendingScreenshot.FORMAT_JPEG
 
-        return Json.toJson(sessionMap)
-    }
-
-    private fun eventToMap(event: UnilitixEvent): Map<String, Any?> {
-        val knownTypes = setOf("TAP", "NAVIGATE", "RAGE_TAP", "CRASH", "EXCEPTION", "SCROLL")
-        val type = if (event.type in knownTypes) event.type else "CUSTOM"
-
-        val props = event.properties
-        val map = LinkedHashMap<String, Any?>()
-        map["type"]             = type
-        map["screen"]           = event.screen ?: ""
-        map["x"]                = (props["x"] as? Number)?.toDouble() ?: 0.0
-        map["y"]                = (props["y"] as? Number)?.toDouble() ?: 0.0
-        map["timestamp"]        = isoTimestamp(event.timestamp)
-        map["memoryUsageMb"]    = (props["memory_usage_mb"] as? Number)?.toDouble()
-        map["cpuUsagePct"]      = (props["cpu_usage_pct"] as? Number)?.toDouble()
-        map["frameDrops"]       = (props["frame_drops"] as? Number)?.toInt()
-        map["capturedOffline"]  = event.capturedOffline
-        map["networkAtCapture"] = event.networkAtCapture
-
-        if (type == "CRASH" || type == "EXCEPTION") {
-            map["stackTrace"]    = props["stack_trace"] as? String ?: ""
-            map["exceptionType"] = props["exception_type"] as? String ?: ""
-            map["exceptionMessage"] = props["exception_message"] as? String ?: ""
-            map["breadcrumbs"]   = props["breadcrumbs"]
-            map["fatal"]         = props["fatal"] as? Boolean ?: (type == "CRASH")
-            (props["title"] as? String)?.let { map["title"] = it }
-            (props["fingerprint"] as? String)?.let {
-                map["metadata"] = mapOf("fingerprint" to it)
-            }
-        }
-
-        // For CUSTOM events, put the original name + remaining props into metadata
-        if (type == "CUSTOM") {
-            val meta = mutableMapOf<String, Any?>("name" to event.type)
-            for ((k, v) in props) {
-                if (k !in setOf("x", "y", "memory_usage_mb", "cpu_usage_pct", "frame_drops")) {
-                    meta[k] = v
-                }
-            }
-            map["metadata"] = meta
-        }
-
-        return map
-    }
-
-    private fun isoTimestamp(epochMs: Long): String {
-        val sdf = java.text.SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", java.util.Locale.US)
-        sdf.timeZone = java.util.TimeZone.getTimeZone("UTC")
-        return sdf.format(java.util.Date(epochMs))
+    /** Parses a wrapper snapshot; null when it is not the contract shape. */
+    internal fun parseExternalSnapshot(json: String): JSONObject? = try {
+        val o = JSONObject(json)
+        if (o.optJSONObject("hierarchy") == null) null else o
+    } catch (e: Exception) {
+        null
     }
 }

@@ -1,0 +1,92 @@
+name: Firebase Test Lab
+# Instrumentation tests (including the performance budgets) on real devices.
+# Manual, plus nightly. Needs the repository secrets GCP_SA_KEY (a service
+# account key JSON with the "Firebase Test Lab Admin" and "Storage Object
+# Admin" roles on the project) and FTL_PROJECT (the GCP project id). Without
+# them the job is skipped.
+on:
+  workflow_dispatch:
+    inputs:
+      budget-scale:
+        description: Multiplier for the performance budgets
+        required: false
+        default: '1.5'
+  schedule:
+    - cron: '17 2 * * *'
+
+permissions:
+  contents: read
+
+jobs:
+  test-lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    env:
+      HAS_FTL: ${{ secrets.GCP_SA_KEY != '' && secrets.FTL_PROJECT != '' }}
+    steps:
+      - name: Secrets present
+        if: env.HAS_FTL != 'true'
+        run: echo "GCP_SA_KEY / FTL_PROJECT not set; skipping Firebase Test Lab." >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        if: env.HAS_FTL == 'true'
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        if: env.HAS_FTL == 'true'
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        if: env.HAS_FTL == 'true'
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+
+      - name: Install NDK and CMake
+        if: env.HAS_FTL == 'true'
+        run: |
+          NDK=$(grep -E '^\s*ndkVersion = ' unilitix-sdk/build.gradle.kts | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          for attempt in 1 2 3 4; do
+            yes | "$SDKMANAGER" --install "ndk;$NDK" "cmake;3.22.1" > /dev/null || true
+            if [ -f "$ANDROID_HOME/ndk/$NDK/source.properties" ]; then break; fi
+            rm -rf "$ANDROID_HOME/ndk/$NDK" "$ANDROID_HOME/.temp" "$ANDROID_HOME/temp"
+            sleep $((attempt * 15))
+          done
+
+      - name: Build the test APK
+        if: env.HAS_FTL == 'true'
+        run: ./gradlew :unilitix-sdk:assembleDebugAndroidTest
+
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        if: env.HAS_FTL == 'true'
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        if: env.HAS_FTL == 'true'
+
+      # A library's test APK instruments itself, so it is both --app and --test.
+      # Device ids: check `gcloud firebase test android models list` (the catalog changes).
+      # Matrix: Android 7 (virtual; software screenshot path), low-end Android 10
+      # and 12 (in-process native handler up to 10), Pixel on Android 13 and 14.
+      - name: Run on real devices
+        if: env.HAS_FTL == 'true'
+        env:
+          FTL_PROJECT: ${{ secrets.FTL_PROJECT }}
+        run: |
+          APK=unilitix-sdk/build/outputs/apk/androidTest/debug/unilitix-sdk-debug-androidTest.apk
+          SCALE="${{ github.event.inputs.budget-scale || '1.5' }}"
+          gcloud firebase test android run \
+            --project "$FTL_PROJECT" \
+            --type instrumentation \
+            --app "$APK" \
+            --test "$APK" \
+            --device model=a10,version=29 \
+            --device model=a03s,version=31 \
+            --device model=oriole,version=33 \
+            --device model=shiba,version=34 \
+            --device model=MediumPhone.arm,version=24 \
+            --environment-variables "unilitixBudgetScale=$SCALE" \
+            --timeout 20m \
+            --num-flaky-test-attempts 1 \
+            --results-history-name unilitix-android

@@ -2,9 +2,18 @@ name: Publish to Maven Central
 on:
   push:
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
+
+permissions:
+  contents: read
+
 jobs:
   publish:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      # SLSA build provenance for the AAR (actions/attest-build-provenance).
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -56,6 +65,14 @@ jobs:
           for abi in armeabi-v7a arm64-v8a x86 x86_64; do
             unzip -l "$AAR" | grep -q "jni/$abi/libunilitix-native.so" || { echo "missing $abi .so in $AAR"; exit 1; }
           done
+
+      # Signed SLSA provenance for the exact AAR published below, verifiable with
+      # `gh attestation verify unilitix-android-<version>.aar --repo Unilitix-hq/unilitix-android`.
+      # (Maven Central additionally requires the GPG signatures the publish step creates.)
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: unilitix-sdk/build/outputs/aar/unilitix-sdk-release.aar
 
       - name: Publish to Maven Central
         run: ./gradlew publishToSonatype closeAndReleaseSonatypeStagingRepository

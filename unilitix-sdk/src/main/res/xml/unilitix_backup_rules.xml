@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Auto Backup rules for Android 6-11 (android:fullBackupContent): keep the
+     Unilitix SDK's ids, user id, consent and queues out of backups. Reference
+     this file from your <application>, or copy the <exclude> lines into your
+     own rules. -->
+<full-backup-content>
+    <exclude domain="sharedpref" path="unilitix_prefs.xml" />
+    <exclude domain="sharedpref" path="unilitix_device.xml" />
+    <exclude domain="sharedpref" path="unilitix_identity.xml" />
+    <exclude domain="sharedpref" path="unilitix_identity_enc.xml" />
+    <exclude domain="sharedpref" path="unilitix_sdk_prefs.xml" />
+    <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_prefs__.xml" />
+    <exclude domain="database" path="unilitix_events.db" />
+    <exclude domain="file" path="unilitix" />
+</full-backup-content>

@@ -54,8 +54,10 @@ jobs:
           done
           test -f "$ANDROID_HOME/ndk/$NDK/source.properties" || { echo "NDK $NDK not installed after retries"; exit 1; }
 
+      # Unit tests include the shared behaviour fixtures (contract 1.4.0,
+      # contract/BehaviourFixturesTest) and the contract constants.
       - name: Unit tests, lint and release build
-        run: ./gradlew :unilitix-sdk:testDebugUnitTest :unilitix-sdk:lintDebug :unilitix-sdk:assembleRelease
+        run: ./gradlew :unilitix-sdk:testDebugUnitTest :unilitix-sdk:lintDebug :unilitix-sdk:assembleRelease :unilitix-sdk:assembleDebugAndroidTest
 
       - name: AAR contains the native library for every ABI
         run: |
@@ -73,3 +75,93 @@ jobs:
             unilitix-sdk/build/reports/
             unilitix-sdk/build/test-results/
           retention-days: 7
+
+  # Instrumentation tests on emulators, including the performance budgets
+  # (src/androidTest/.../benchmark, docs/performance.md): init cost on the main
+  # thread, trackEvent cost, screenshot capture cost. API 24 exercises the
+  # software-draw screenshot path and the in-process native crash handler;
+  # API 34 PixelCopy, ApplicationExitInfo and the current platform.
+  emulator:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - api-level: 24
+            target: default
+          - api-level: 34
+            target: google_apis
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5.7.0
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5.0.2
+
+      - name: Install NDK and CMake
+        run: |
+          NDK=$(grep -E '^\s*ndkVersion = ' unilitix-sdk/build.gradle.kts | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+          test -n "$NDK" || { echo "ndkVersion not found in unilitix-sdk/build.gradle.kts"; exit 1; }
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          for attempt in 1 2 3 4; do
+            yes | "$SDKMANAGER" --install "ndk;$NDK" "cmake;3.22.1" > /dev/null || true
+            if [ -f "$ANDROID_HOME/ndk/$NDK/source.properties" ] && [ -d "$ANDROID_HOME/cmake/3.22.1" ]; then break; fi
+            echo "sdkmanager attempt $attempt failed; retrying"
+            rm -rf "$ANDROID_HOME/ndk/$NDK" "$ANDROID_HOME/.temp" "$ANDROID_HOME/temp"
+            sleep $((attempt * 15))
+          done
+          test -f "$ANDROID_HOME/ndk/$NDK/source.properties" || { echo "NDK $NDK not installed after retries"; exit 1; }
+
+      # Hardware acceleration for the emulator on GitHub's Linux runners.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Build the test APK
+        run: ./gradlew :unilitix-sdk:assembleDebugAndroidTest
+
+      - name: Instrumentation tests and performance budgets (API ${{ matrix.api-level }})
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        with:
+          api-level: ${{ matrix.api-level }}
+          target: ${{ matrix.target }}
+          arch: x86_64
+          profile: pixel_6
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          # Emulators on shared runners are slower than phones: budgets x2.
+          script: |
+            adb logcat -c || true
+            ./gradlew :unilitix-sdk:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.unilitixBudgetScale=2
+            adb logcat -d | grep -o 'UNILITIX_BENCH.*' > bench-api${{ matrix.api-level }}.txt || true
+
+      - name: Benchmark summary
+        if: always()
+        run: |
+          echo "### Performance budgets, API ${{ matrix.api-level }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ -s bench-api${{ matrix.api-level }}.txt ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            cat bench-api${{ matrix.api-level }}.txt >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "No benchmark output." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload instrumentation reports
+        if: always()
+        uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5.0.0
+        with:
+          name: instrumentation-api${{ matrix.api-level }}
+          path: |
+            unilitix-sdk/build/reports/androidTests/
+            unilitix-sdk/build/outputs/androidTest-results/
+            bench-api${{ matrix.api-level }}.txt
+          retention-days: 14

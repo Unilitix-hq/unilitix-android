@@ -1,21 +1,31 @@
 package io.unilitix.sdk
 
 /**
- * Annotate a View **class** with @UnilitixPrivate to prevent it from being
- * tracked: taps on it are not recorded and it is masked in screenshots and
- * snapshots.
+ * Hides views from Unilitix: taps on them are not recorded and they are
+ * masked in screenshots and snapshots (with everything inside them).
  *
+ * On a View **class** — every instance is private:
  * ```kotlin
  * @UnilitixPrivate
  * class CardNumberView(context: Context) : AppCompatEditText(context)
  * ```
  *
- * Only the class annotation is honoured. FIELD and PROPERTY stay in [Target]
- * for source compatibility (code annotating a field keeps compiling), but the
- * SDK inspects the view object, not the field holding it, so annotating a
- * field or property has no effect: use `maskedViewIds` for single views.
+ * On a **field** of an Activity or Fragment (1.11.0) — the view it holds is
+ * private. The SDK reads these fields when the Activity resumes and when a
+ * Fragment's view is created or resumed:
+ * ```kotlin
+ * class CheckoutActivity : AppCompatActivity() {
+ *     @UnilitixPrivate lateinit var cardNumber: EditText
+ * }
+ * ```
+ * In Kotlin the annotation goes on the property's backing field (the default
+ * for this annotation); a property without a backing field cannot carry it.
+ * For any other view, call `Unilitix.mask(view)`.
+ *
+ * Up to 1.10.2 `PROPERTY` was also a target but had no effect; code that
+ * annotates a property with a backing field now applies to that field.
  */
 @Retention(AnnotationRetention.RUNTIME)
-@Target(AnnotationTarget.CLASS, AnnotationTarget.FIELD, AnnotationTarget.PROPERTY)
+@Target(AnnotationTarget.CLASS, AnnotationTarget.FIELD)
 @MustBeDocumented
 annotation class UnilitixPrivate

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Backup and device-transfer rules for Android 12+ (android:dataExtractionRules):
+     keep the Unilitix SDK's ids, user id, consent and queues out of cloud
+     backups and device-to-device transfers. -->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="sharedpref" path="unilitix_prefs.xml" />
+        <exclude domain="sharedpref" path="unilitix_device.xml" />
+        <exclude domain="sharedpref" path="unilitix_identity.xml" />
+        <exclude domain="sharedpref" path="unilitix_identity_enc.xml" />
+        <exclude domain="sharedpref" path="unilitix_sdk_prefs.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_prefs__.xml" />
+        <exclude domain="database" path="unilitix_events.db" />
+        <exclude domain="file" path="unilitix" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="sharedpref" path="unilitix_prefs.xml" />
+        <exclude domain="sharedpref" path="unilitix_device.xml" />
+        <exclude domain="sharedpref" path="unilitix_identity.xml" />
+        <exclude domain="sharedpref" path="unilitix_identity_enc.xml" />
+        <exclude domain="sharedpref" path="unilitix_sdk_prefs.xml" />
+        <exclude domain="sharedpref" path="__androidx_security_crypto_encrypted_prefs__.xml" />
+        <exclude domain="database" path="unilitix_events.db" />
+        <exclude domain="file" path="unilitix" />
+    </device-transfer>
+</data-extraction-rules>
