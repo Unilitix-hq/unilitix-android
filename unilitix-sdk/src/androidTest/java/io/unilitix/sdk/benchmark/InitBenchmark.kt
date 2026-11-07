@@ -5,15 +5,14 @@ import io.unilitix.sdk.Unilitix
 import org.junit.Assert.assertNotNull
 import org.junit.Rule
 import org.junit.Test
-import org.junit.rules.Timeout
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class InitBenchmark {
 
-    /** A hang fails this test by name instead of stalling the whole CI step. */
+    /** A hang fails this test by name, with the main thread's stack, instead of stalling CI. */
     @get:Rule
-    val timeout: Timeout = Timeout.seconds(120)
+    val hangGuard = HangGuard(120)
 
     @Test
     fun init_main_thread_cost_is_within_budget() {
