@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.11.1
+
+### Fixed
+- **Replay: a frame could be skipped when two were requested back to back.**
+  The capture slot was freed only after the finished frame had been handed
+  on, so a capture started from that hand-off found the SDK still busy and
+  was dropped. Apps rarely hit this (frames are at least a second apart).
+
+### Tests and CI
+- The screenshot benchmark launches its screen directly and wakes the
+  emulator first (on Android 14 emulators `ActivityScenario` waited forever),
+  uses its own frame budget, and reports the device state if the screen never
+  appears. Benchmarks fail by name after 2 minutes instead of stalling CI;
+  emulator budgets are scaled x3.
+
 ## 1.11.0
 
 Brings the SDK in line with the Unilitix SDK contract 1.4.0 (all of its shared

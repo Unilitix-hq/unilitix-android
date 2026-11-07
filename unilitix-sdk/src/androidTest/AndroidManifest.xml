@@ -3,7 +3,7 @@
     <application>
         <activity
             android:name="io.unilitix.sdk.benchmark.BenchmarkActivity"
-            android:exported="false"
+            android:exported="true"
             android:theme="@android:style/Theme.Material.Light.NoActionBar" />
     </application>
 </manifest>

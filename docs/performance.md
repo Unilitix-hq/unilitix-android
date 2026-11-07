@@ -28,7 +28,7 @@ Run them locally on a connected device or emulator:
 ```
 ./gradlew :unilitix-sdk:connectedDebugAndroidTest
 # slower device: scale every budget
-./gradlew :unilitix-sdk:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.unilitixBudgetScale=2
+./gradlew :unilitix-sdk:connectedDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.unilitixBudgetScale=3
 adb logcat -d | grep UNILITIX_BENCH
 ```
 
