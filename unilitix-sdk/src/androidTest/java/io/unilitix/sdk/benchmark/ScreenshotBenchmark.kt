@@ -22,7 +22,12 @@ class ScreenshotBenchmark {
 
     @Test
     fun screenshot_capture_cost_is_within_budget() {
-        val config = UnilitixConfig.Builder().build()
+        // The default 20-a-minute budget would refuse frames part-way through
+        // the 25 below (that cap is tested elsewhere); measure capture cost only.
+        val config = UnilitixConfig.Builder()
+            .maxScreenshotsPerMinute(10_000)
+            .screenshotIntervalMs(0)
+            .build()
         val replayState = ReplayState(10_000, 10_000, 10_000)
         var session = 0
         var latch = CountDownLatch(1)
