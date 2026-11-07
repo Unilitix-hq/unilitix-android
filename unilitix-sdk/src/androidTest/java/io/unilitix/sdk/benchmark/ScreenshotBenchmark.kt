@@ -115,7 +115,10 @@ class ScreenshotBenchmark {
             // Android 14's background-activity-launch rules do not block.
             shell("input keyevent KEYCODE_WAKEUP")
             shell("wm dismiss-keyguard")
-            shell("am start -n ${app.packageName}/${BenchmarkActivity::class.java.name}")
+            // -W waits for the launch; its output says why if Android refuses it.
+            // (The activity is exported in the test manifest: the shell may only
+            // start exported activities.)
+            val started = shell("am start -W -n ${app.packageName}/${BenchmarkActivity::class.java.name}").trim()
             if (!resumed.await(30, TimeUnit.SECONDS)) {
                 val window = shell("dumpsys window").lines().filter {
                     it.contains("mCurrentFocus") || it.contains("mFocusedApp") ||
@@ -123,9 +126,10 @@ class ScreenshotBenchmark {
                 }.joinToString("\n") { it.trim() }
                 val power = shell("dumpsys power").lines()
                     .filter { it.contains("mWakefulness=") }.joinToString(" ") { it.trim() }
+                // One line: Gradle's console shows only the start of a failure message.
                 throw AssertionError(
-                    "benchmark activity was not resumed within 30 s.\n" +
-                        "lifecycle: $seen\n$power\n$window",
+                    "benchmark activity was not resumed within 30 s | lifecycle: $seen | " +
+                        "am start: ${started.replace('\n', ' ')} | $power | ${window.replace('\n', ' ')}",
                 )
             }
         } finally {
