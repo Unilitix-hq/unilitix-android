@@ -58,6 +58,10 @@ android {
     }
 
     testOptions {
+        // The instrumentation test APK otherwise targets minSdk (21): Android 10+
+        // then shows its legacy-app permission review in front of every activity
+        // the tests launch, and they never reach the foreground.
+        targetSdk = 36
         // Instrumentation tests (src/androidTest) include the performance
         // budgets of docs/performance.md; see .github/workflows/ci.yml.
         animationsDisabled = true
