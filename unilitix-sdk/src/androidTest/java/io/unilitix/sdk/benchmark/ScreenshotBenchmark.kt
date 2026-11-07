@@ -2,8 +2,8 @@ package io.unilitix.sdk.benchmark
 
 import android.app.Activity
 import android.app.Application
-import android.content.Intent
 import android.os.Bundle
+import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -89,29 +89,54 @@ class ScreenshotBenchmark {
         val app = ApplicationProvider.getApplicationContext<Application>()
         val resumed = CountDownLatch(1)
         var launched: Activity? = null
+        val seen = java.util.Collections.synchronizedList(ArrayList<String>())
         val callbacks = object : Application.ActivityLifecycleCallbacks {
+            private fun note(event: String, activity: Activity) {
+                seen += "${activity.javaClass.simpleName}.$event"
+            }
             override fun onActivityResumed(activity: Activity) {
+                note("resumed", activity)
                 if (activity is BenchmarkActivity) {
                     launched = activity
                     resumed.countDown()
                 }
             }
-            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) {}
-            override fun onActivityStarted(activity: Activity) {}
-            override fun onActivityPaused(activity: Activity) {}
-            override fun onActivityStopped(activity: Activity) {}
+            override fun onActivityCreated(activity: Activity, savedInstanceState: Bundle?) = note("created", activity)
+            override fun onActivityStarted(activity: Activity) = note("started", activity)
+            override fun onActivityPaused(activity: Activity) = note("paused", activity)
+            override fun onActivityStopped(activity: Activity) = note("stopped", activity)
             override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
-            override fun onActivityDestroyed(activity: Activity) {}
+            override fun onActivityDestroyed(activity: Activity) = note("destroyed", activity)
         }
         app.registerActivityLifecycleCallbacks(callbacks)
         try {
-            app.startActivity(
-                Intent(app, BenchmarkActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
-            )
-            assertTrue("benchmark activity was not resumed within 30 s", resumed.await(30, TimeUnit.SECONDS))
+            // The emulator may lock or sleep after CI's unlock step ran: wake and
+            // unlock right before launching. `am start` runs as the shell, which
+            // Android 14's background-activity-launch rules do not block.
+            shell("input keyevent KEYCODE_WAKEUP")
+            shell("wm dismiss-keyguard")
+            shell("am start -n ${app.packageName}/${BenchmarkActivity::class.java.name}")
+            if (!resumed.await(30, TimeUnit.SECONDS)) {
+                val window = shell("dumpsys window").lines().filter {
+                    it.contains("mCurrentFocus") || it.contains("mFocusedApp") ||
+                        it.contains("KeyguardShowing", ignoreCase = true) || it.contains("mDreamingLockscreen")
+                }.joinToString("\n") { it.trim() }
+                val power = shell("dumpsys power").lines()
+                    .filter { it.contains("mWakefulness=") }.joinToString(" ") { it.trim() }
+                throw AssertionError(
+                    "benchmark activity was not resumed within 30 s.\n" +
+                        "lifecycle: $seen\n$power\n$window",
+                )
+            }
         } finally {
             app.unregisterActivityLifecycleCallbacks(callbacks)
         }
         return launched!!
+    }
+
+    /** Runs [command] as the shell user and returns its output. */
+    private fun shell(command: String): String {
+        val fd = InstrumentationRegistry.getInstrumentation().uiAutomation.executeShellCommand(command)
+        return ParcelFileDescriptor.AutoCloseInputStream(fd).bufferedReader().use { it.readText() }
     }
 }

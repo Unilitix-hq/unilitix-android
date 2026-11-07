@@ -275,6 +275,7 @@ internal class ScreenshotCapture(
 
     /** Worker thread: paint masks, encode, hand off. */
     private fun finish(bitmap: Bitmap, meta: FrameMeta) {
+        var released = false
         try {
             if (failureLatch.disabled) return
             if (meta.masks.isNotEmpty()) {
@@ -293,6 +294,11 @@ internal class ScreenshotCapture(
                 }
             }
             val bytes = encodeWebP(bitmap, config.screenshotQuality)
+            // Free the slot before handing the frame on: whatever onScreenshot
+            // triggers (the next capture included) must not find us busy.
+            bitmap.recycle()
+            released = true
+            busy = false
             onScreenshot(
                 meta.sessionId,
                 Screenshot(
@@ -308,7 +314,8 @@ internal class ScreenshotCapture(
             onCaptureFailure("encoding", t)
         } finally {
             if (!bitmap.isRecycled) bitmap.recycle()
-            busy = false
+            // Once released, the next frame may already be in flight: leave its flag alone.
+            if (!released) busy = false
         }
     }
 
