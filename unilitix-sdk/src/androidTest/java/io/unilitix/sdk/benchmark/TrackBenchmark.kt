@@ -3,11 +3,17 @@ package io.unilitix.sdk.benchmark
 import android.os.SystemClock
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import io.unilitix.sdk.Unilitix
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.Timeout
 import org.junit.runner.RunWith
 
 @RunWith(AndroidJUnit4::class)
 class TrackBenchmark {
+
+    /** A hang fails this test by name instead of stalling the whole CI step. */
+    @get:Rule
+    val timeout: Timeout = Timeout.seconds(120)
 
     private val props = mapOf<String, Any?>("sku" to "SKU-1042", "price" to 12500, "currency" to "NGN", "express" to true)
 

@@ -3,18 +3,23 @@ package io.unilitix.sdk.benchmark
 import android.os.SystemClock
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
-import androidx.test.platform.app.InstrumentationRegistry
 import io.unilitix.sdk.UnilitixConfig
 import io.unilitix.sdk.capture.ReplayState
 import io.unilitix.sdk.capture.ScreenshotCapture
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.Timeout
 import org.junit.runner.RunWith
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 
 @RunWith(AndroidJUnit4::class)
 class ScreenshotBenchmark {
+
+    /** A hang fails this test by name instead of stalling the whole CI step. */
+    @get:Rule
+    val timeout: Timeout = Timeout.seconds(120)
 
     @Test
     fun screenshot_capture_cost_is_within_budget() {
@@ -34,7 +39,15 @@ class ScreenshotBenchmark {
         val mainSamples = ArrayList<Double>()
         val totalSamples = ArrayList<Double>()
         ActivityScenario.launch(BenchmarkActivity::class.java).use { scenario ->
-            InstrumentationRegistry.getInstrumentation().waitForIdleSync()
+            // Not waitForIdleSync(): with the SDK running, the main thread is rarely
+            // fully idle (watchdog pings, frame callbacks), so it may never return.
+            var focused = false
+            val deadline = SystemClock.elapsedRealtime() + 15_000
+            while (!focused && SystemClock.elapsedRealtime() < deadline) {
+                scenario.onActivity { focused = it.hasWindowFocus() }
+                if (!focused) SystemClock.sleep(100)
+            }
+            assertTrue("benchmark activity never got window focus (screen locked?)", focused)
             repeat(25) { i ->
                 session = i
                 latch = CountDownLatch(1)
