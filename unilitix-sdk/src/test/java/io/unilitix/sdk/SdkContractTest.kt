@@ -6,7 +6,13 @@ import io.unilitix.sdk.contract.SdkContract
 import io.unilitix.sdk.core.Breadcrumbs
 import io.unilitix.sdk.core.ErrorReportLimiter
 import io.unilitix.sdk.core.Fingerprint
+import io.unilitix.sdk.core.NativeFrames
+import io.unilitix.sdk.engine.Normalize
+import io.unilitix.sdk.engine.NetworkTypes
+import io.unilitix.sdk.engine.UnilitixCore
+import io.unilitix.sdk.network.ApiClient
 import io.unilitix.sdk.network.RetryPolicy
+import io.unilitix.sdk.network.UploadOutcome
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -17,7 +23,8 @@ import org.junit.Test
  * `go run ./cmd/sdkcontract`; copy it over, never edit it by hand.
  *
  * Keys in [SdkContract.divergences] are known gaps with a planned fix and are
- * skipped. Since 1.6.0 Android has none.
+ * skipped. Since 1.6.0 Android has none. Behaviour (contract 1.4.0) is
+ * checked by contract/BehaviourFixturesTest against the shared fixtures.
  */
 class SdkContractTest {
 
@@ -100,6 +107,53 @@ class SdkContractTest {
         assertEquals(SdkContract.RETRY_MAX_DELAY_MS, RetryPolicy.MAX_DELAY_MS)
         assertEquals(SdkContract.RETRY_AFTER_MIN_SECONDS, RetryPolicy.RETRY_AFTER_MIN_SECONDS)
         assertEquals(SdkContract.RETRY_AFTER_MAX_SECONDS, RetryPolicy.RETRY_AFTER_MAX_SECONDS)
+    }
+
+    @Test
+    fun `1_4_0 limits match the contract`() {
+        assertEquals(SdkContract.PRE_INIT_BUFFER_SIZE, UnilitixCore.PRE_INIT_BUFFER_SIZE.toLong())
+        assertEquals(SdkContract.MAX_PROPERTY_DEPTH, Normalize.MAX_DEPTH.toLong())
+        assertEquals(SdkContract.MAX_PROPERTY_KEYS, Normalize.MAX_KEYS.toLong())
+        assertEquals(SdkContract.MAX_STRING_LENGTH, Normalize.MAX_STRING_LENGTH.toLong())
+        assertEquals(SdkContract.TRUNCATED_MARKER, Normalize.TRUNCATED)
+        assertEquals(SdkContract.PAYMENT_BACKOFF_MS, RetryPolicy.PAYMENT_BACKOFF_MS)
+        assertEquals(SdkContract.PAYMENT_RETRY_AFTER_MAX_SECONDS, RetryPolicy.PAYMENT_RETRY_AFTER_MAX_SECONDS)
+        assertEquals(SdkContract.REQUEST_TIMEOUT_SECONDS, ApiClient.REQUEST_TIMEOUT_SECONDS)
+        assertEquals(SdkContract.FINGERPRINT_FRAMES, Fingerprint.FRAMES.toLong())
+    }
+
+    @Test
+    fun `network types and rules match the contract`() {
+        assertEquals(SdkContract.networkTypes, NetworkTypes.ALL)
+        for ((rule, want) in SdkContract.networkTypeRules) {
+            val (transport, generation, online) = rule.split('/')
+            val gens = if (generation == "*") listOf("2g", "3g", "4g", "5g", "unknown") else listOf(generation)
+            val transports = if (transport == "*") listOf("wifi", "ethernet", "cellular", "none", "other") else listOf(transport)
+            for (t in transports) for (g in gens) {
+                assertEquals("$rule ($t/$g)", want, NetworkTypes.canonical(t, g, online == "online"))
+            }
+        }
+    }
+
+    @Test
+    fun `retry classification matches the contract`() {
+        val names = mapOf(
+            UploadOutcome.SENT to "sent", UploadOutcome.RETRY_LATER to "retry", UploadOutcome.AUTH_REJECTED to "auth",
+            UploadOutcome.PAYMENT_PAUSED to "payment", UploadOutcome.DROPPED to "drop",
+        )
+        for ((status, want) in SdkContract.retryStatusOutcomes) {
+            assertEquals("status $status", want, names[RetryPolicy.classifyStatus(status.toInt())])
+        }
+        assertEquals(120_000L, RetryPolicy.paymentDelayMs(120))
+        assertEquals(3_600_000L, RetryPolicy.paymentDelayMs(86_400))
+        assertEquals(1_000L, RetryPolicy.paymentDelayMs(0))
+        assertEquals(900_000L, RetryPolicy.paymentDelayMs(null))
+    }
+
+    @Test
+    fun `native system images and path prefixes match the contract`() {
+        assertEquals(SdkContract.nativeSystemImages, NativeFrames.SYSTEM_IMAGES)
+        assertEquals(SdkContract.nativeSystemPathPrefixes, NativeFrames.SYSTEM_PATH_PREFIXES)
     }
 
     @Test

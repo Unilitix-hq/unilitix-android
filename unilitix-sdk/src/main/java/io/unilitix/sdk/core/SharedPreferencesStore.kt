@@ -8,4 +8,5 @@ internal class SharedPreferencesStore(private val prefs: SharedPreferences) : Ke
     override fun getBoolean(key: String, default: Boolean): Boolean = prefs.getBoolean(key, default)
     override fun putString(key: String, value: String) { prefs.edit().putString(key, value).apply() }
     override fun putBoolean(key: String, value: Boolean) { prefs.edit().putBoolean(key, value).apply() }
+    override fun remove(key: String) { prefs.edit().remove(key).apply() }
 }

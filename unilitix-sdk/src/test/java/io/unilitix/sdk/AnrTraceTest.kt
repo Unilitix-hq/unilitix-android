@@ -1,12 +1,10 @@
 package io.unilitix.sdk
 
 import io.unilitix.sdk.capture.AnrTrace
-import io.unilitix.sdk.capture.NativeCrashReporter
 import io.unilitix.sdk.capture.ProcessExit
 import io.unilitix.sdk.capture.ProcessExits
 import io.unilitix.sdk.core.Fingerprint
 import io.unilitix.sdk.core.KeyValueStore
-import io.unilitix.sdk.core.SessionHistory
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -102,8 +100,9 @@ DALVIK THREADS (24):
         dump: String? = dump(),
         description: String? = "user request after error: Input dispatching timed out",
         importance: Int? = 100,
-        reads: IntArray? = null
-    ) = ProcessExit(ProcessExits.REASON_ANR, ts, pid = 8123, description = description, importance = importance,
+        reads: IntArray? = null,
+        pid: Int = 8123
+    ) = ProcessExit(ProcessExits.REASON_ANR, ts, pid = pid, description = description, importance = importance,
         readTrace = { reads?.let { it[0]++ }; dump?.toByteArray() })
 
     // ── Parsing the dump ─────────────────────────────────────────────
@@ -217,24 +216,10 @@ DALVIK THREADS (24):
     }
 
     @Test
-    fun `ANR goes to the session that was running, consent pending holds and denied drops`() {
-        val h = SessionHistory(MemoryStore())
-        h.recordStart("old", killedAt - 3_600_000)
-        h.recordStart("frozen", killedAt - 60_000)
-        h.recordBatch("frozen", killedAt - 60_000, """{"sessionId":"frozen","crashed":false}""", killedAt - 30_000)
-        h.recordStart("current", launchedAt)
-        val anr = AnrTrace.fromExit(anrExit(killedAt))
-        val reporter = NativeCrashReporter(h)
-
-        val placed = reporter.placeAnrs(listOf(anr), UnilitixConsent.GRANTED, "current")
-        assertEquals(1, placed.size)
-        assertEquals("frozen", placed[0].session!!.id)
-        assertEquals("the session ends when the process was killed", killedAt, SessionHistory.endedAt(placed[0].session!!, killedAt))
-
-        assertEquals(1, reporter.placeAnrs(listOf(anr), UnilitixConsent.PENDING, "current").size)
-        assertTrue(reporter.placeAnrs(listOf(anr), UnilitixConsent.DENIED, "current").isEmpty())
-
-        val none = NativeCrashReporter(SessionHistory(MemoryStore())).placeAnrs(listOf(anr), UnilitixConsent.GRANTED, "current")
-        assertNull("no stored session: the current one", none[0].session)
+    fun `an ANR the live watchdog already reported is not reported again from the exit record`() {
+        val exits = listOf(anrExit(killedAt + 1, pid = 4242), anrExit(killedAt + 2, pid = 4343))
+        val kv = MemoryStore(mutableMapOf(ProcessExits.KEY_WATERMARK to killedAt.toString()))
+        val scan = ProcessExits.scan(kv, exits, launchedAt, skipAnrPids = setOf(4242))
+        assertEquals(listOf(killedAt + 2), scan.anrs.map { it.timestampMs })
     }
 }

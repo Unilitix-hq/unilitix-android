@@ -60,14 +60,18 @@ internal object ProcessExits {
      * at most once. Consent is applied by the caller: a denied scan still
      * advances the watermark, so the reports are dropped, not held.
      */
-    fun scan(kv: KeyValueStore, exits: List<ProcessExit>, nowMs: Long): Scan {
+    fun scan(kv: KeyValueStore, exits: List<ProcessExit>, nowMs: Long, skipAnrPids: Set<Int> = emptySet()): Scan {
         val stored = kv.getString(KEY_WATERMARK)?.toLongOrNull()
-        val result = select(exits, stored, nowMs)
+        val result = select(exits, stored, nowMs, skipAnrPids)
         if (stored == null || result.watermark != stored) kv.putString(KEY_WATERMARK, result.watermark.toString())
         return result
     }
 
-    fun select(exits: List<ProcessExit>, watermark: Long?, nowMs: Long): Scan {
+    /**
+     * [skipAnrPids]: processes whose ANR the live watchdog already reported
+     * ([AnrWatchdog], 1.11.0); their `REASON_ANR` exits are not reported again.
+     */
+    fun select(exits: List<ProcessExit>, watermark: Long?, nowMs: Long, skipAnrPids: Set<Int> = emptySet()): Scan {
         val newest = exits.maxOfOrNull { it.timestampMs }
         if (watermark == null) {
             // First launch with exit-info capture: start from now.
@@ -80,7 +84,7 @@ internal object ProcessExits {
             .map { crashOf(it) }
         // The thread dump is read only for the ANRs kept.
         val anrs = fresh
-            .filter { it.reason == REASON_ANR }
+            .filter { it.reason == REASON_ANR && it.pid !in skipAnrPids }
             .takeLast(MAX_ANRS_REPORTED)
             .map { AnrTrace.fromExit(it) }
         return Scan(crashes, maxOf(watermark, newest ?: watermark), anrs)

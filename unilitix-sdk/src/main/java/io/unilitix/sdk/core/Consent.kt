@@ -11,6 +11,8 @@ internal interface KeyValueStore {
     fun getBoolean(key: String, default: Boolean): Boolean
     fun putString(key: String, value: String)
     fun putBoolean(key: String, value: Boolean)
+    /** Deletes [key]. Stores that cannot delete store an empty string, which readers treat as absent. */
+    fun remove(key: String) { putString(key, "") }
 }
 
 /**

@@ -48,6 +48,8 @@ data class UnilitixConfig internal constructor(
     val maskImages: Boolean,
     val maxScreenshotsPerMinute: Int,
     val screenshotHeartbeatMs: Long,
+    /** See [Builder.anrWatchdogTimeoutMs]. */
+    val anrWatchdogTimeoutMs: Long = 5_000L,
 ) {
     /** DSL + Java builder. Var properties support Kotlin `property = value` syntax. */
     class Builder {
@@ -127,6 +129,16 @@ data class UnilitixConfig internal constructor(
          * heartbeat off. Never shorter than [screenshotIntervalMs].
          */
         var screenshotHeartbeatMs: Long = 10_000L
+        /**
+         * Live ANR detection (1.11.0): when the main thread does not respond
+         * for this long while the app is in the foreground, an `ANR` event
+         * with the main thread's stack is reported at once. Default 5000 ms
+         * (the system's input-dispatch timeout); clamped to 1000–60000;
+         * 0 turns the watchdog off. Requires [autoTrackCrashes]. On API 30+
+         * the system's ANR record is also read on the next launch; an ANR
+         * the watchdog already reported is not reported twice.
+         */
+        var anrWatchdogTimeoutMs: Long = 5_000L
 
         // Method-style setters for Java interop (fluent API).
         fun apiUrl(v: String)                      = apply { apiUrl = v }
@@ -157,6 +169,7 @@ data class UnilitixConfig internal constructor(
         fun maskImages(v: Boolean)                 = apply { maskImages = v }
         fun maxScreenshotsPerMinute(v: Int)        = apply { maxScreenshotsPerMinute = v }
         fun screenshotHeartbeatMs(v: Long)         = apply { screenshotHeartbeatMs = v }
+        fun anrWatchdogTimeoutMs(v: Long)          = apply { anrWatchdogTimeoutMs = v }
 
         /**
          * Out-of-range values are clamped here (1.10.2), never thrown on: a
@@ -192,6 +205,7 @@ data class UnilitixConfig internal constructor(
             maskImages                = maskImages,
             maxScreenshotsPerMinute   = maxScreenshotsPerMinute.coerceAtLeast(0),
             screenshotHeartbeatMs     = screenshotHeartbeatMs.coerceAtLeast(0L),
+            anrWatchdogTimeoutMs      = if (anrWatchdogTimeoutMs <= 0L) 0L else anrWatchdogTimeoutMs.coerceIn(1_000L, 60_000L),
         )
     }
 

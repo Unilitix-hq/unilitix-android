@@ -11,39 +11,70 @@ import android.graphics.drawable.BitmapDrawable
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
+import android.os.HandlerThread
 import android.os.Looper
 import android.os.SystemClock
 import android.text.InputType
+import android.view.PixelCopy
 import android.view.View
 import android.view.ViewGroup
 import android.view.ViewTreeObserver
+import android.view.Window
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.TextView
+import androidx.annotation.RequiresApi
 import io.unilitix.sdk.Unilitix
 import io.unilitix.sdk.UnilitixConfig
-import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.core.Screenshot
 import io.unilitix.sdk.util.Logger
 import java.io.ByteArrayOutputStream
-import java.util.concurrent.Executors
 
+/**
+ * Screenshots of the resumed activity's window for session replay.
+ *
+ * 1.11.0: on API 26+ the frame is read with [PixelCopy] straight into a
+ * bitmap at the upload size (`screenshotMaxWidth`), off the main thread: the
+ * main thread only computes the mask rectangles and starts the copy, and the
+ * GPU-rendered frame (including hardware bitmaps, which a software draw
+ * cannot read) is what the user saw. Below API 26, or when PixelCopy fails
+ * repeatedly, the view tree is drawn into a bitmap at the upload size through
+ * a scaled canvas. Never a full-resolution ARGB bitmap. Masks are painted
+ * before the frame is encoded; if anything fails the frame is dropped
+ * (every Throwable is caught; an OutOfMemoryError turns capture off for the
+ * process).
+ *
+ * Nothing is captured while consent is denied, while the session is not
+ * sampled for replay, while a wrapper SDK supplies frames
+ * ([ReplayState.externalCapture]) or on a FLAG_SECURE window.
+ */
 internal class ScreenshotCapture(
     private val config: UnilitixConfig,
-    /** False while consent is denied: nothing is captured. */
+    /** Consent allows capture and the current session is sampled for replay. */
     private val isEnabled: () -> Boolean = { true },
     /** Current session id; a new id resets the scheduler (first frame, budget). */
     private val sessionId: () -> String? = { null },
-    private val onScreenshot: (Screenshot) -> Unit,
+    private val replayState: ReplayState,
+    private val onScreenshot: (sessionId: String, Screenshot) -> Unit,
 ) : Application.ActivityLifecycleCallbacks {
 
     private val handler = Handler(Looper.getMainLooper())
-    private val captureExecutor = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "unilitix-screenshot").also { it.isDaemon = true }
+
+    /** PixelCopy results and encoding happen here, never on the main thread. */
+    private val worker: Handler by lazy {
+        val t = HandlerThread("unilitix-screenshot")
+        t.isDaemon = true
+        t.start()
+        Handler(t.looper)
     }
 
-    @Volatile private var ordinal = 0
     private var currentActivity: Activity? = null
+
+    /** Consecutive PixelCopy failures; after [MAX_PIXEL_COPY_FAILURES] the software draw is used. */
+    @Volatile private var pixelCopyFailures = 0
+
+    /** True while a frame is being copied or encoded: at most one in flight. */
+    @Volatile private var busy = false
 
     private val maskPolicy = MaskPolicy(
         maskInputs              = config.maskInputs,
@@ -60,12 +91,9 @@ internal class ScreenshotCapture(
         clock        = { SystemClock.uptimeMillis() },
     )
 
-    // How often the scheduler is asked. Capture itself happens only when it
-    // says so; the check is cheap.
     private val tickMs = config.screenshotIntervalMs.coerceIn(MIN_TICK_MS, MAX_TICK_MS)
 
-    // Any frame the window draws marks the screen dirty. Our own software
-    // draw into a bitmap does not go through ViewRootImpl, so it does not.
+    // Any frame the window draws marks the screen dirty.
     private val drawListener = ViewTreeObserver.OnDrawListener { scheduler.markDirty() }
     private var observedView: View? = null
 
@@ -87,12 +115,8 @@ internal class ScreenshotCapture(
         if (failureLatch.record(t)) {
             Logger.w("ScreenshotCapture: out of memory during $stage; screenshots disabled for this process")
         } else {
-            Logger.w("ScreenshotCapture: $stage failed: ${t.javaClass.simpleName}: ${t.message}")
+            Logger.d("ScreenshotCapture: $stage failed: ${t.javaClass.simpleName}: ${t.message}")
         }
-    }
-
-    fun resetOrdinal() {
-        ordinal = 0
     }
 
     override fun onActivityResumed(activity: Activity) {
@@ -138,90 +162,157 @@ internal class ScreenshotCapture(
         }
     }
 
+    /** Main thread. */
     private fun capture(activity: Activity) {
+        if (busy) return
+        if (replayState.externalCapture) return
         if (!isEnabled()) return
-        if (ordinal >= config.maxScreenshotsPerSession) return
+        val session = sessionId() ?: return
+        val window = activity.window ?: return
 
-        // FLAG_SECURE marks a screen the app keeps out of screenshots and the
-        // recents list (banking, payments): replay honours it.
-        if (ReplayMasking.isSecureWindow(activity.window.attributes.flags)) return
+        // FLAG_SECURE marks a screen the app keeps out of screenshots (banking,
+        // payments): replay honours it.
+        if (ReplayMasking.isSecureWindow(window.attributes.flags)) return
 
-        val rootView = activity.window.decorView.rootView
-        // Drawn straight at the upload size (screenshotMaxWidth), not full size.
+        val rootView = window.decorView.rootView
+        // A layout or draw is pending: the rectangles would not match the frame.
+        if (rootView.isLayoutRequested) return
         val size = ScreenshotSize.target(rootView.width, rootView.height, config.screenshotMaxWidth) ?: return
 
         // Asked last: a yes spends one unit of the per-minute budget.
-        if (!scheduler.shouldCapture(sessionId() ?: "")) return
+        if (!scheduler.shouldCapture(session)) return
+        val ordinal = replayState.nextScreenshotOrdinal(session) ?: return
 
-        // The window in dp (logical px): the coordinate space taps are reported
-        // in, for overlaying them on the frame. The image itself keeps its pixels.
-        val window = WindowGeometry.windowPixels(activity)
+        PrivacyTags.scanActivity(activity)
+
+        // The window in dp: the coordinate space taps are reported in.
+        val windowPx = WindowGeometry.windowPixels(activity)
         val density = WindowGeometry.density(activity)
-        val viewportW = Dp.of(window.right - window.left, density)
-        val viewportH = Dp.of(window.bottom - window.top, density)
+        val viewportW = Dp.of(windowPx.right - windowPx.left, density)
+        val viewportH = Dp.of(windowPx.bottom - windowPx.top, density)
+        val screenName = activity.javaClass.simpleName
+        // In root-view pixels; painted after scaling. Computed here, on the
+        // main thread: if masking cannot be computed the frame is not taken.
+        val maskRects = collectMaskRects(rootView)
+        val meta = FrameMeta(session, ordinal, screenName, viewportW, viewportH, size.scale, maskRects)
 
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && pixelCopyFailures < MAX_PIXEL_COPY_FAILURES &&
+            rootView.isHardwareAccelerated
+        ) {
+            copyPixels(window, size, meta)
+        } else {
+            drawSoftware(rootView, size, meta)
+        }
+    }
+
+    private class FrameMeta(
+        val sessionId: String,
+        val ordinal: Int,
+        val screenName: String,
+        val viewportWidth: Int,
+        val viewportHeight: Int,
+        val scale: Float,
+        val masks: List<Rect>,
+    )
+
+    @RequiresApi(Build.VERSION_CODES.O)
+    private fun copyPixels(window: Window, size: ScreenshotSize.Target, meta: FrameMeta) {
+        val bitmap = try {
+            Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
+        } catch (t: Throwable) {
+            onCaptureFailure("allocation", t)
+            return
+        }
+        busy = true
+        try {
+            // PixelCopy scales the window surface into the target-size bitmap.
+            PixelCopy.request(window, bitmap, { result ->
+                // Worker thread.
+                if (result == PixelCopy.SUCCESS) {
+                    pixelCopyFailures = 0
+                    finish(bitmap, meta)
+                } else {
+                    pixelCopyFailures++
+                    bitmap.recycle()
+                    busy = false
+                    Logger.d("ScreenshotCapture: PixelCopy result $result")
+                }
+            }, worker)
+        } catch (t: Throwable) {
+            // IllegalArgumentException: the window has no surface yet.
+            bitmap.recycle()
+            busy = false
+            pixelCopyFailures++
+            onCaptureFailure("pixel copy", t)
+        }
+    }
+
+    /** API < 26 (or PixelCopy unavailable): the view tree drawn at the target scale, main thread. */
+    private fun drawSoftware(rootView: View, size: ScreenshotSize.Target, meta: FrameMeta) {
         var bitmap: Bitmap? = null
         try {
             val bmp = Bitmap.createBitmap(size.width, size.height, Bitmap.Config.ARGB_8888)
             bitmap = bmp
             val canvas = Canvas(bmp)
             if (size.scale < 1f) canvas.scale(size.scale, size.scale)
+            // Throws IllegalArgumentException on hardware bitmaps (API 26+): caught, frame dropped.
             rootView.draw(canvas)
-
-            // Mask rects are in root-view pixels; the canvas is scaled to match.
-            // Private views and maskedViewIds are always masked; text, inputs and
-            // images follow maskAllText / maskInputs(InScreenshots) / maskImages.
-            // Painted here, on the main thread, so an unmasked frame never
-            // leaves it; if masking fails the frame is dropped.
-            val maskRects = collectMaskRects(rootView)
-            if (maskRects.isNotEmpty()) {
-                val paint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
-                for (rect in maskRects) canvas.drawRect(rect, paint)
-            }
         } catch (t: Throwable) {
-            // Includes OutOfMemoryError: the frame is dropped, never the app.
             bitmap?.recycle()
-            onCaptureFailure("capture", t)
+            onCaptureFailure("draw", t)
             return
         }
-        val frame: Bitmap = bitmap ?: return
-
-        val currentOrdinal = ordinal++
-        val screenName = activity.javaClass.simpleName
-
-        val encode = Runnable {
-            try {
-                if (failureLatch.disabled) return@Runnable
-                val webpBytes = encodeWebP(frame, config.screenshotQuality)
-
-                onScreenshot(
-                    Screenshot(
-                        ordinal = currentOrdinal,
-                        capturedAt = System.currentTimeMillis(),
-                        screenName = screenName,
-                        viewportWidth = viewportW,
-                        viewportHeight = viewportH,
-                        imageBytes = webpBytes,
-                    )
-                )
-            } catch (t: Throwable) {
-                // Includes OutOfMemoryError while encoding: off the main thread,
-                // but an uncaught throwable here would still kill the process.
-                onCaptureFailure("encoding", t)
-            } finally {
-                if (!frame.isRecycled) frame.recycle()
-            }
-        }
+        val frame = bitmap ?: return
+        busy = true
         try {
-            captureExecutor.execute(encode)
+            worker.post { finish(frame, meta) }
         } catch (t: Throwable) {
-            // RejectedExecutionException: the frame is dropped.
             frame.recycle()
+            busy = false
             onCaptureFailure("hand-off", t)
         }
     }
 
-    // Returns Rect coordinates relative to rootView — safe to call on main thread only
+    /** Worker thread: paint masks, encode, hand off. */
+    private fun finish(bitmap: Bitmap, meta: FrameMeta) {
+        try {
+            if (failureLatch.disabled) return
+            if (meta.masks.isNotEmpty()) {
+                val canvas = Canvas(bitmap)
+                val paint = Paint().apply { color = Color.BLACK; style = Paint.Style.FILL }
+                val s = meta.scale
+                for (r in meta.masks) {
+                    // Rounded outwards so a scaled mask never leaves a sliver.
+                    canvas.drawRect(
+                        Math.floor((r.left * s).toDouble()).toFloat(),
+                        Math.floor((r.top * s).toDouble()).toFloat(),
+                        Math.ceil((r.right * s).toDouble()).toFloat(),
+                        Math.ceil((r.bottom * s).toDouble()).toFloat(),
+                        paint,
+                    )
+                }
+            }
+            val bytes = encodeWebP(bitmap, config.screenshotQuality)
+            onScreenshot(
+                meta.sessionId,
+                Screenshot(
+                    ordinal = meta.ordinal,
+                    capturedAt = System.currentTimeMillis(),
+                    screenName = meta.screenName,
+                    viewportWidth = meta.viewportWidth,
+                    viewportHeight = meta.viewportHeight,
+                    imageBytes = bytes,
+                )
+            )
+        } catch (t: Throwable) {
+            onCaptureFailure("encoding", t)
+        } finally {
+            if (!bitmap.isRecycled) bitmap.recycle()
+            busy = false
+        }
+    }
+
+    // Rect coordinates relative to rootView — main thread only.
     private fun collectMaskRects(rootView: View): List<Rect> {
         val rootLoc = IntArray(2)
         rootView.getLocationInWindow(rootLoc)
@@ -237,12 +328,10 @@ internal class ScreenshotCapture(
      * [isUnreadable] and masked whole.
      */
     private inner class ViewNode(private val view: View, private val rootLoc: IntArray) : MaskableNode {
-        // Read at most once per walk, and only for Compose hosts.
         private val compose: ComposeTree? by lazy(LazyThreadSafetyMode.NONE) {
             if (ComposeHost.isHost(view)) ComposeHost.read(view) else null
         }
-        // A WebView's page (logins, KYC and payment forms) cannot be walked for
-        // its text and inputs, so it is masked whole, as on iOS.
+        // A WebView's page cannot be walked for its text and inputs: masked whole.
         override val isUnreadable: Boolean
             get() = view is android.webkit.WebView || (compose?.unreadableForScreenshot ?: false)
         override val kind: NodeKind
@@ -254,7 +343,7 @@ internal class ScreenshotCapture(
                 else -> NodeKind.OTHER
             }
         override val isVisible: Boolean get() = view.visibility == View.VISIBLE
-        override val isPrivate: Boolean get() = view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java)
+        override val isPrivate: Boolean get() = PrivacyTags.isPrivate(view)
         override val isMaskedById: Boolean get() = view.id != View.NO_ID && config.maskedViewIds.contains(view.id)
         override val isUnmasked: Boolean get() = Unilitix.isUnmasked(view)
         override val isPassword: Boolean
@@ -266,8 +355,7 @@ internal class ScreenshotCapture(
                     (it and InputType.TYPE_MASK_CLASS) == InputType.TYPE_CLASS_NUMBER &&
                     (it and InputType.TYPE_MASK_VARIATION) == InputType.TYPE_NUMBER_VARIATION_PASSWORD
             }
-        // Visible part only: a label scrolled half out of a list is masked
-        // where it shows, not over the header above the list.
+        // Visible part only.
         override val rect: MaskRect?
             get() {
                 if (view.width <= 0 || view.height <= 0) return null
@@ -281,7 +369,6 @@ internal class ScreenshotCapture(
                 val views: List<MaskableNode> =
                     if (group == null) emptyList() else List(group.childCount) { ViewNode(group.getChildAt(it), rootLoc) }
                 val root = compose?.root ?: return views
-                // Compose nodes are relative to the host's top-left; clipped to its visible part.
                 val clip = rect ?: return views
                 val loc = IntArray(2)
                 view.getLocationInWindow(loc)
@@ -306,9 +393,20 @@ internal class ScreenshotCapture(
     override fun onActivitySaveInstanceState(activity: Activity, outState: Bundle) {}
     override fun onActivityDestroyed(activity: Activity) {}
 
+    /** One capture attempt now, as the tick would make it (instrumentation benchmarks). Main thread. */
+    internal fun captureForTest(activity: Activity) = capture(activity)
+
+    /** Stops ticking (SDK shutdown). */
+    fun stop() {
+        handler.removeCallbacks(captureRunnable)
+        stopObservingDraws()
+        currentActivity = null
+    }
+
     companion object {
         private const val MIN_TICK_MS = 250L
         private const val MAX_TICK_MS = 1_000L
+        private const val MAX_PIXEL_COPY_FAILURES = 3
 
         /** Process-wide: after an OutOfMemoryError no capture instance takes screenshots again. */
         internal val failureLatch = CaptureFailureLatch()

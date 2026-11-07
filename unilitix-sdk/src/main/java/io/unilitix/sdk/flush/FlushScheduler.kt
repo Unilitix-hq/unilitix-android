@@ -10,10 +10,9 @@ import io.unilitix.sdk.util.Logger
 import java.util.concurrent.TimeUnit
 
 /**
- * Enqueues [FlushWorker] as one unique work chain, so at most one flush runs
- * at a time. Backoff is the SDK's own ([io.unilitix.sdk.network.UploadGate]),
- * not WorkManager's: the worker never returns `Result.retry()`; after a
- * retryable failure it calls [scheduleRetry] for when the window closes.
+ * Enqueues [FlushWorker] as one unique work chain, so at most one runs at a
+ * time. Backoff is the engine's own, not WorkManager's: the worker never
+ * returns `Result.retry()`.
  */
 internal class FlushScheduler(private val context: Context) {
 

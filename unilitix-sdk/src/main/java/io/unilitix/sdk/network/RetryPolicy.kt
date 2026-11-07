@@ -9,6 +9,11 @@ internal sealed class ApiResult {
     data class ClientError(val code: Int, val message: String) : ApiResult()
     /** 401/403: the API key is wrong or revoked. Uploads pause; data is kept. */
     data class AuthError(val code: Int) : ApiResult()
+    /**
+     * 402: the workspace's plan is exhausted. Data is kept and uploads pause
+     * for `Retry-After` (clamped to 1–3600 s) or 15 minutes (contract 1.4.0).
+     */
+    data class PaymentRequired(val retryAfterSeconds: Long? = null) : ApiResult()
     /** 408 or 429. [retryAfterSeconds] is the raw `Retry-After` value, if any. */
     data class RateLimit(val code: Int = 429, val retryAfterSeconds: Long? = null) : ApiResult()
     data class ServerError(val code: Int, val retryAfterSeconds: Long? = null) : ApiResult()
@@ -20,6 +25,7 @@ internal sealed class ApiResult {
             val retryAfter = RetryPolicy.parseRetryAfter(retryAfterHeader)
             return when {
                 RetryPolicy.isAuthFailure(code) -> AuthError(code)
+                code == 402                     -> PaymentRequired(retryAfter)
                 code == 408 || code == 429      -> RateLimit(code, retryAfter)
                 code in 400..499                -> ClientError(code, message)
                 else                            -> ServerError(code, retryAfter)
@@ -38,6 +44,8 @@ internal enum class UploadOutcome {
     AUTH_REJECTED,
     /** Any other 4xx: drop that batch, no backoff. */
     DROPPED,
+    /** 402: keep the data; uploads pause for the payment window (not a consecutive failure). */
+    PAYMENT_PAUSED,
 }
 
 /**
@@ -55,6 +63,10 @@ internal object RetryPolicy {
     const val JITTER_FRACTION          = 0.2
     const val RETRY_AFTER_MIN_SECONDS  = 1L
     const val RETRY_AFTER_MAX_SECONDS  = 60L
+    /** Contract `paymentBackoffMs`: the 402 pause without `Retry-After`. */
+    const val PAYMENT_BACKOFF_MS       = 900_000L
+    /** Contract `paymentRetryAfterMaxSeconds`. */
+    const val PAYMENT_RETRY_AFTER_MAX_SECONDS = 3_600L
 
     /** 401 and 403 mean the key itself is wrong, not that the request was. */
     fun isAuthFailure(code: Int): Boolean = code == 401 || code == 403
@@ -62,6 +74,7 @@ internal object RetryPolicy {
     fun classify(result: ApiResult): UploadOutcome = when (result) {
         is ApiResult.Success      -> UploadOutcome.SENT
         is ApiResult.AuthError    -> UploadOutcome.AUTH_REJECTED
+        is ApiResult.PaymentRequired -> UploadOutcome.PAYMENT_PAUSED
         is ApiResult.ClientError  -> UploadOutcome.DROPPED
         is ApiResult.RateLimit,
         is ApiResult.ServerError,
@@ -82,6 +95,18 @@ internal object RetryPolicy {
     /** A `Retry-After` value in seconds, clamped to 1–60 s, in milliseconds. */
     fun retryAfterMs(seconds: Long): Long =
         seconds.coerceIn(RETRY_AFTER_MIN_SECONDS, RETRY_AFTER_MAX_SECONDS) * 1_000L
+
+    /** The 402 pause: `Retry-After` clamped to 1–3600 s, else [PAYMENT_BACKOFF_MS]. */
+    fun paymentDelayMs(retryAfterSeconds: Long?): Long =
+        if (retryAfterSeconds != null) retryAfterSeconds.coerceIn(RETRY_AFTER_MIN_SECONDS, PAYMENT_RETRY_AFTER_MAX_SECONDS) * 1_000L
+        else PAYMENT_BACKOFF_MS
+
+    /** Classification of a raw status (0 = no response), as the contract's `retryStatusOutcomes`. */
+    fun classifyStatus(status: Int): UploadOutcome = when {
+        status == 0 -> UploadOutcome.RETRY_LATER
+        status in 200..299 -> UploadOutcome.SENT
+        else -> classify(ApiResult.failure(status, null))
+    }
 
     /** The window to wait: `Retry-After` when the server sent one, else [backoffMs]. */
     fun delayFor(failures: Int, retryAfterSeconds: Long?, random: Random = Random.Default): Long =
@@ -166,6 +191,12 @@ internal class UploadGate(
             UploadOutcome.DROPPED -> {
                 Logger.w("Unilitix: $what rejected by the API (${describe(result)}) — dropped")
             }
+            UploadOutcome.PAYMENT_PAUSED -> {
+                // Not a consecutive failure: the exponential backoff is untouched.
+                val delay = RetryPolicy.paymentDelayMs((result as? ApiResult.PaymentRequired)?.retryAfterSeconds)
+                backoffUntil = clock() + delay
+                Logger.w("Unilitix: $what refused: the workspace's plan limit is reached (HTTP 402). Data is kept; uploads pause for ${delay / 1000}s.")
+            }
         }
         return outcome
     }
@@ -174,6 +205,7 @@ internal class UploadGate(
         is ApiResult.Success      -> "ok"
         is ApiResult.ClientError  -> "HTTP ${result.code}"
         is ApiResult.AuthError    -> "HTTP ${result.code}"
+        is ApiResult.PaymentRequired -> "HTTP 402"
         is ApiResult.RateLimit    -> "HTTP ${result.code}" + (result.retryAfterSeconds?.let { ", Retry-After ${it}s" } ?: "")
         is ApiResult.ServerError  -> "HTTP ${result.code}" + (result.retryAfterSeconds?.let { ", Retry-After ${it}s" } ?: "")
         is ApiResult.NetworkError -> "network error: ${result.throwable.javaClass.simpleName}"

@@ -1,53 +1,43 @@
 package io.unilitix.sdk.capture
 
 import android.content.Context
-import io.unilitix.sdk.core.Breadcrumbs
 import io.unilitix.sdk.core.Fingerprint
-import io.unilitix.sdk.storage.EventDatabase
-import io.unilitix.sdk.storage.PendingEvent
+import io.unilitix.sdk.engine.EngineJson
+import io.unilitix.sdk.engine.ErrorReport
+import io.unilitix.sdk.engine.IsoTime
+import io.unilitix.sdk.engine.PriorBatch
+import io.unilitix.sdk.engine.UnilitixCore
 import io.unilitix.sdk.util.Logger
-import io.unilitix.sdk.util.Json
-import kotlinx.coroutines.CoroutineExceptionHandler
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.launch
-import org.json.JSONObject
 import java.io.File
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
-import java.util.TimeZone
+import java.util.UUID
 
+/**
+ * Uncaught JVM exceptions. Installed synchronously in `Unilitix.init` (before
+ * the rest of the SDK starts on a background thread), so a crash during app
+ * start is caught too.
+ *
+ * The crash is written to a small fallback file first, then recorded through
+ * the engine (marks the session crashed, persists the CRASH event and starts
+ * an upload), waiting at most the contract's fatal flush budget (2 s) before
+ * handing over to the previous handler. When the engine persisted it, the
+ * file is deleted; otherwise (the engine was not ready yet, or the disk is
+ * stuck) the next launch reports it from the file ([recoverPending]). Both
+ * copies carry the same eventId, so the server keeps one.
+ */
 internal class CrashHandler(
     private val context: Context,
-    private val breadcrumbs: Breadcrumbs,
-    private val database: EventDatabase,
-    private val getCurrentSessionJson: () -> String?,
-    private val onCrash: () -> Unit,
+    private val core: UnilitixCore,
     /** False while consent is denied: the crash is passed on, not recorded. */
     private val isEnabled: () -> Boolean = { true },
-    /**
-     * Per-session dedup (contract `maxReportsPerFingerprint`,
-     * `maxErrorReportsPerSession`): false when this fingerprint was already
-     * reported often enough this session. The crash is still passed on.
-     */
-    private val admitReport: (fingerprint: String) -> Boolean = { true },
     /**
      * Tells the native signal handler (API 21-29) that this exception is
      * dealt with, so a SIGABRT that follows it is not reported a second
      * time as a native crash.
      */
-    private val markNativeHandled: () -> Unit = { NativeSignalHandler.markExceptionHandled() }
+    private val markNativeHandled: () -> Unit = { NativeSignalHandler.markExceptionHandled() },
 ) : Thread.UncaughtExceptionHandler {
 
     private val originalHandler = Thread.getDefaultUncaughtExceptionHandler()
-
-    // Dedicated scope for crash persistence — never blocks the crash thread.
-    private val crashScope = CoroutineScope(
-        SupervisorJob() + Dispatchers.IO +
-        CoroutineExceptionHandler { _, _ -> /* already crashing — ignore */ }
-    )
 
     fun install() {
         Thread.setDefaultUncaughtExceptionHandler(this)
@@ -74,99 +64,45 @@ internal class CrashHandler(
             // Native's fatal JS error, re-thrown as JavascriptException) asks
             // for it to be passed on unrecorded, so it is not counted twice.
             val filter = crashFilter
-            if (filter != null && !runCatching { filter(throwable) }.getOrDefault(true)) {
-                onCrash()
-                return // finally still hands the crash to the original handler
-            }
-            onCrash()
+            if (filter != null && !runCatching { filter(throwable) }.getOrDefault(true)) return
 
-            val stackTrace = throwable.stackTraceToString().take(16_000)
-            val crumbs = breadcrumbs.toWire()
-            val lastScreen = breadcrumbs.lastScreen() ?: ""
-            val exType = throwable.javaClass.name
-            val title = "$exType: ${throwable.message ?: ""}".take(200)
-            val fingerprint = Fingerprint.of(exType, stackTrace)
-            if (!admitReport(fingerprint)) {
-                Logger.d("CrashHandler: repeat crash $fingerprint suppressed (per-session cap)")
-                return // finally still hands the crash to the original handler
-            }
+            val stackTrace = throwable.stackTraceToString().take(MAX_STACK)
+            val type = throwable.javaClass.name
+            val message = throwable.message ?: ""
+            val eventId = UUID.randomUUID().toString()
+            val engine = core.engine
 
-            val crashEvent = mapOf(
-                "type"             to "CRASH",
-                "timestamp"        to isoNow(),
-                "exceptionType"    to exType,
-                "exceptionMessage" to (throwable.message ?: ""),
-                "stackTrace"       to stackTrace,
-                "breadcrumbs"      to crumbs,
-                // A JVM uncaught exception kills the process: fatal, like the
-                // Flutter SDK's native crashes. Title and fingerprint let the
-                // server group one bug once across devices.
-                "fatal"            to true,
-                "title"            to title,
-                "metadata"         to mapOf("fingerprint" to fingerprint),
-                "screen"           to lastScreen,
-                "x"                to 0.0,
-                "y"                to 0.0,
-                "capturedOffline"  to false,
-                "networkAtCapture" to ""
-            )
+            // The disk copy first: survives whatever happens next.
+            val pending = pendingFile(context)
+            writePending(pending, engine?.currentSessionId(), eventId, type, message, stackTrace)
 
-            val sessionJson = getCurrentSessionJson() ?: "{}"
-            val eventsJson = Json.toJson(listOf(crashEvent))
-
-            // Write to disk first — if Room is unavailable during the crash this is the fallback.
-            persistCrashToDisk(sessionJson, eventsJson)
-
-            // Insert into the queue database, waiting at most the contract's
-            // fatal flush budget (2 s): the disk copy above already survives
-            // the process, and the next handler (Crashlytics, the system dialog)
-            // must not be held up longer than that.
-            val persisted = java.util.concurrent.CountDownLatch(1)
-            crashScope.launch {
-                try {
-                    database.eventDao().insert(
-                        PendingEvent(
-                            sessionJson = sessionJson,
-                            eventsJson = eventsJson
-                        )
-                    )
-                    // Room insert succeeded — disk copy is now redundant.
-                    crashPendingFile().delete()
-                    Logger.d("CrashHandler: crash persisted to DB")
-                } catch (e: Exception) {
-                    Logger.e("CrashHandler: failed to persist crash to DB", e)
-                    // Disk copy remains and will be recovered on next launch.
-                } finally {
-                    persisted.countDown()
-                }
-            }
-            persisted.await(FATAL_FLUSH_BUDGET_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
-
-        } catch (e: Exception) {
+            val report = ErrorReport(type, message, stackTrace, fatal = true, platform = PLATFORM, eventId = eventId)
+            val persisted = core.recordFatal(report, FATAL_FLUSH_BUDGET_MS)
+            if (persisted) pending.delete() else Logger.w("Unilitix: crash kept on disk for the next launch")
+        } catch (e: Throwable) {
             Logger.e("CrashHandler: error in crash handler", e)
         } finally {
             originalHandler?.uncaughtException(thread, throwable)
         }
     }
 
-    private fun persistCrashToDisk(sessionJson: String, eventsJson: String) {
+    private fun writePending(file: File, sessionId: String?, eventId: String, type: String, message: String, stack: String) {
         try {
-            val payload = JSONObject().apply {
-                put("sessionJson", sessionJson)
-                put("eventsJson", eventsJson)
-            }
-            crashPendingFile().writeText(payload.toString())
-        } catch (e: Exception) {
+            val event = linkedMapOf<String, Any?>(
+                "type" to "CRASH",
+                "eventId" to eventId,
+                "timestamp" to IsoTime.format(System.currentTimeMillis()),
+                "exceptionType" to type,
+                "exceptionMessage" to message,
+                "stackTrace" to stack,
+                "fatal" to true,
+                "title" to "$type: $message".take(200),
+                "metadata" to linkedMapOf("fingerprint" to Fingerprint.of(type, stack), "platform" to PLATFORM),
+            )
+            file.writeText(EngineJson.write(linkedMapOf("sessionId" to sessionId, "event" to event)))
+        } catch (e: Throwable) {
             Logger.e("CrashHandler: failed to persist crash to disk", e)
         }
-    }
-
-    private fun crashPendingFile(): File = File(context.cacheDir, "unilitix_crash_pending.json")
-
-    private fun isoNow(): String {
-        val sdf = SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", Locale.US)
-        sdf.timeZone = TimeZone.getTimeZone("UTC")
-        return sdf.format(Date())
     }
 
     internal companion object {
@@ -176,5 +112,31 @@ internal class CrashHandler(
 
         /** Contract `fatalFlushBudgetMs`: the longest a crash may hold the crashing thread. */
         const val FATAL_FLUSH_BUDGET_MS = 2_000L
+        const val MAX_STACK = 16_000
+        const val PLATFORM = "android"
+
+        fun pendingFile(context: Context): File = File(context.cacheDir, "unilitix_crash_pending.json")
+
+        /**
+         * The crash a previous process could only write to the fallback file:
+         * the 1.11.0 form `{sessionId, event}`, or the 1.10 form
+         * `{sessionJson, eventsJson}`. Read and deleted once.
+         */
+        @Suppress("UNCHECKED_CAST")
+        fun recoverPending(context: Context): PriorBatch? {
+            val file = pendingFile(context)
+            if (!file.isFile) return null
+            val text = try { file.readText() } catch (e: Exception) { null }
+            file.delete()
+            val obj = text?.let { EngineJson.parseObject(it) } ?: return null
+            (obj["event"] as? Map<String, Any?>)?.let { event ->
+                return PriorBatch(obj["sessionId"] as? String, null, listOf(event))
+            }
+            val session = (obj["sessionJson"] as? String)?.let { EngineJson.parseObject(it) }
+            val events = (obj["eventsJson"] as? String)?.let {
+                try { EngineJson.parse(it) as? List<Map<String, Any?>> } catch (e: Exception) { null }
+            } ?: return null
+            return PriorBatch((session?.get("sessionId") as? String)?.takeIf { it.isNotEmpty() }, session, events)
+        }
     }
 }

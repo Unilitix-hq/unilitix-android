@@ -15,7 +15,14 @@ internal data class PendingScreenshot(
     @ColumnInfo(name = "captured_at") val capturedAt: Long,
     @ColumnInfo(name = "image_bytes", typeAffinity = ColumnInfo.BLOB) val imageBytes: ByteArray,
     @ColumnInfo(name = "created_at") val createdAt: Long = System.currentTimeMillis(),
+    /** `webp` (native capture) or `jpeg` (frames from a wrapper SDK), 1.11.0. */
+    @ColumnInfo(name = "format") val format: String = FORMAT_WEBP,
 ) {
+    companion object {
+        const val FORMAT_WEBP = "webp"
+        const val FORMAT_JPEG = "jpeg"
+    }
+
     override fun equals(other: Any?): Boolean {
         if (this === other) return true
         if (other !is PendingScreenshot) return false

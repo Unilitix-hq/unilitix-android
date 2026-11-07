@@ -2,7 +2,6 @@ package io.unilitix.sdk
 
 import io.unilitix.sdk.capture.NativeCrashFile
 import io.unilitix.sdk.capture.NativeCrashRecord
-import io.unilitix.sdk.capture.NativeCrashReporter
 import io.unilitix.sdk.capture.NativeSignalHandler
 import io.unilitix.sdk.capture.ProcessExit
 import io.unilitix.sdk.capture.ProcessExits
@@ -10,12 +9,12 @@ import io.unilitix.sdk.capture.Tombstone
 import io.unilitix.sdk.capture.TombstoneSignal
 import io.unilitix.sdk.core.Fingerprint
 import io.unilitix.sdk.core.KeyValueStore
-import io.unilitix.sdk.core.SessionHistory
 import io.unilitix.sdk.util.LogSink
 import io.unilitix.sdk.util.Logger
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -428,7 +427,7 @@ class NativeCrashTest {
     }
 
     @Test
-    fun `native crash from exit info carries the backtrace and keeps its SIGNAL fingerprint`() {
+    fun `native crash from exit info carries the backtrace and groups by its app frames`() {
         val scan = ProcessExits.select(
             listOf(exit(ProcessExits.REASON_CRASH_NATIVE, crashedAt + 1, "Fatal signal 6 (SIGABRT)", nativeTombstone())),
             crashedAt, launchedAt
@@ -436,13 +435,15 @@ class NativeCrashTest {
         val crash = scan.crashes.single()
         assertEquals(11, crash.signal)
         assertTrue(crash.stackTrace!!.startsWith("#00 pc 000000000001a2b4  $lib (BuildId: 9f2c00aa)\n#01 pc "))
-        assertEquals("grouping unchanged: SIGNAL:11", "8f1fc15bfa06be00", crash.fingerprint)
+        // Contract 1.4.0: SIGNAL:11 plus the first app frames (libshop.so, libother.so), not SIGNAL:11 alone.
+        assertEquals(Fingerprint.native("SIGNAL:11", crash.stackTrace!!), crash.fingerprint)
+        assertNotEquals("8f1fc15bfa06be00", crash.fingerprint)
         val e = NativeCrashRecord.toEvent(crash, launchedAt, ::iso)
         assertEquals(crash.stackTrace, e["stackTrace"])
         assertEquals("SIGNAL: Fatal signal 11 (SIGSEGV)", e["title"])
         @Suppress("UNCHECKED_CAST")
-        assertEquals("8f1fc15bfa06be00", (e["metadata"] as Map<String, Any?>)["fingerprint"])
-        // Description only (API 30, or no tombstone): as before, no stack.
+        assertEquals(crash.fingerprint, (e["metadata"] as Map<String, Any?>)["fingerprint"])
+        // Description only (API 30, or no tombstone): no stack, the 1.3 grouping.
         val noTrace = ProcessExits.crashOf(exit(ProcessExits.REASON_CRASH_NATIVE, crashedAt, "Fatal signal 6 (SIGABRT)"))
         assertEquals(6, noTrace.signal)
         assertNull(noTrace.stackTrace)
@@ -450,14 +451,16 @@ class NativeCrashTest {
     }
 
     @Test
-    fun `signal record with a backtrace from the API 21-29 handler keeps its SIGNAL fingerprint`() {
+    fun `signal record with a backtrace from the API 21-29 handler groups by its app frames`() {
         // Exactly what libunilitix-native.so writes from 1.10.0.
         val text = """{"platform":"android","exceptionType":"SIGNAL","signal":11,"timestamp":$crashedAt,""" +
             """"stackTrace":"#00 pc 000000000001a2b4  $lib (BuildId: 9f2c00aa)\n#01 pc 000000000001a1f0  $lib (BuildId: 9f2c00aa)"}"""
         val crash = NativeCrashRecord.parse(text)!!
         assertEquals("#00 pc 000000000001a2b4  $lib (BuildId: 9f2c00aa)\n#01 pc 000000000001a1f0  $lib (BuildId: 9f2c00aa)", crash.stackTrace)
-        assertEquals("8f1fc15bfa06be00", crash.fingerprint)
-        assertEquals(Fingerprint.of("SIGNAL", null), NativeCrashRecord.fingerprint("SIGNAL", null, crash.stackTrace))
+        // SIGNAL:11|libshop.so+0x1a2b4|libshop.so+0x1a1f0
+        assertEquals("fc75f7bee7867eb5", crash.fingerprint)
+        // Unknown signal and no app frames: the bare type.
+        assertEquals(Fingerprint.of("SIGNAL", null), NativeCrashRecord.fingerprint("SIGNAL", null, "#00 pc 0000000000001000  /system/lib64/libc.so (abort+4)"))
         // A non-signal record from another SDK still hashes its stack.
         assertEquals(Fingerprint.of("NSRangeException", "#0 a (b.dart:1)"), NativeCrashRecord.fingerprint("NSRangeException", null, "#0 a (b.dart:1)"))
     }
@@ -477,63 +480,7 @@ class NativeCrashTest {
         }
     }
 
-    // ── Attribution and consent ──────────────────────────────────────
-
-    private fun history(): SessionHistory = SessionHistory(MemoryStore())
-
-    @Test
-    fun `crash is attributed to the session that was running`() {
-        val h = history()
-        h.recordStart("old", crashedAt - 3_600_000)
-        h.recordStart("crashed", crashedAt - 60_000)
-        h.recordBatch("crashed", crashedAt - 60_000, """{"sessionId":"crashed"}""", crashedAt - 30_000)
-        h.recordStart("current", launchedAt)
-        val crash = NativeCrashRecord.parse(signalRecord(11))!!
-        val placed = NativeCrashReporter(h).place(listOf(crash), UnilitixConsent.GRANTED, currentSessionId = "current")
-        assertEquals(1, placed.size)
-        val target = placed[0].session!!
-        assertEquals("crashed", target.id)
-        assertEquals("""{"sessionId":"crashed"}""", target.sessionJson)
-        assertEquals("the session's duration ends at the crash", crashedAt, SessionHistory.endedAt(target, crashedAt))
-    }
-
-    @Test
-    fun `session started within the second of the crash still matches`() {
-        val h = history()
-        h.recordStart("before", crashedAt - 10_000)
-        h.recordStart("same-second", crashedAt + 999)
-        h.recordStart("after", crashedAt + 1_001)
-        assertEquals("same-second", h.sessionAt(crashedAt)!!.id)
-    }
-
-    @Test
-    fun `no stored session reports the crash in the current one`() {
-        val h = history()
-        h.recordStart("current", launchedAt)
-        val crash = NativeCrashRecord.parse(signalRecord(11))!!
-        val placed = NativeCrashReporter(h).place(listOf(crash), UnilitixConsent.GRANTED, "current")
-        assertEquals(1, placed.size)
-        assertNull(placed[0].session)
-    }
-
-    @Test
-    fun `crash without timestamp goes to the latest earlier session`() {
-        val h = history()
-        h.recordStart("a", crashedAt - 10_000)
-        h.recordStart("b", crashedAt - 5_000)
-        h.recordStart("current", launchedAt)
-        assertEquals("b", h.sessionAt(null, excludeId = "current")!!.id)
-    }
-
-    @Test
-    fun `pending consent holds the crash on the device, denied drops it`() {
-        val h = history()
-        h.recordStart("crashed", crashedAt - 1_000)
-        val crash = NativeCrashRecord.parse(signalRecord(11))!!
-        val reporter = NativeCrashReporter(h)
-        assertEquals(1, reporter.place(listOf(crash), UnilitixConsent.PENDING, null).size)
-        assertTrue(reporter.place(listOf(crash), UnilitixConsent.DENIED, null).isEmpty())
-    }
+    // ── Consent and the exit watermark (attribution: EngineTest, behaviour fixtures) ──
 
     @Test
     fun `denied consent still advances the watermark so the crash is never reported later`() {
@@ -542,32 +489,6 @@ class NativeCrashTest {
         // The caller scans first (always), then drops on DENIED.
         assertEquals(1, ProcessExits.scan(kv, exits, launchedAt).crashes.size)
         assertTrue(ProcessExits.scan(kv, exits, launchedAt + 1).crashes.isEmpty())
-    }
-
-    @Test
-    fun `session history keeps the newest sessions and survives a relaunch`() {
-        val kv = MemoryStore()
-        val h = SessionHistory(kv, maxEntries = 3)
-        (1..5).forEach { h.recordStart("s$it", it * 1_000L) }
-        // JSON escapes tabs and newlines, so a record never breaks the line format.
-        h.recordBatch("s5", 5_000, """{"a":"tab\tand\nnewline"}""", 6_000)
-        val relaunched = SessionHistory(kv, maxEntries = 3)
-        assertEquals(listOf("s3", "s4", "s5"), relaunched.entries().map { it.id })
-        assertEquals(6_000L, relaunched.entries().last().lastSeenAt)
-        assertNotNull(relaunched.entries().last().sessionJson)
-        // A later start record keeps the stored JSON.
-        relaunched.recordStart("s5", 5_000)
-        assertNotNull(relaunched.entries().last().sessionJson)
-        relaunched.clear()
-        assertTrue(relaunched.entries().isEmpty())
-    }
-
-    @Test
-    fun `crashed session ends at its last sign of life if that is later than the crash`() {
-        val e = SessionHistory.Entry("s", startedAt = 1_000, lastSeenAt = 9_000, sessionJson = null)
-        assertEquals(9_000, SessionHistory.endedAt(e, 5_000))
-        assertEquals(12_000, SessionHistory.endedAt(e, 12_000))
-        assertEquals(9_000, SessionHistory.endedAt(e, null))
     }
 
     // ── Signal handler install and the JVM-exception suppression flag ─

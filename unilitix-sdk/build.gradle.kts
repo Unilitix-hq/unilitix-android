@@ -56,6 +56,17 @@ android {
     kotlinOptions {
         jvmTarget = "1.8"
     }
+
+    testOptions {
+        // Instrumentation tests (src/androidTest) include the performance
+        // budgets of docs/performance.md; see .github/workflows/ci.yml.
+        animationsDisabled = true
+    }
+
+    lint {
+        abortOnError = true
+        checkDependencies = false
+    }
 }
 
 dependencies {
@@ -90,6 +101,8 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.coroutines.test)
     androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.espresso.core)
 }
 

@@ -1,5 +1,108 @@
 # Changelog
 
+## 1.11.0
+
+Brings the SDK in line with the Unilitix SDK contract 1.4.0 (all of its shared
+behaviour tests pass), adds the API the Flutter 3.0 and React Native SDKs build
+on, and makes start-up, replay and crash reporting faster and more reliable.
+Drop-in for most apps; read "Changed" before updating.
+
+### Added
+- **Calls before `init` are kept.** Events, screens, identify, consent and other
+  calls made before the SDK has started (up to 200, oldest dropped first) are
+  replayed in order once the first session starts. They used to be dropped.
+- **Live ANR detection on every Android version.** When the main thread is
+  blocked for 5 seconds while your app is in front, an `ANR` is reported right
+  away with the main thread's stack, even if the app recovers. Set the
+  threshold with `anrWatchdogTimeoutMs` (0 turns it off). On Android 11+ the
+  system's ANR record is still read on the next launch, and the same ANR is
+  never reported twice.
+- **`Unilitix.mask(view)`, and `@UnilitixPrivate` on fields.** Annotating a
+  View field of an Activity or Fragment now hides that view in replay and stops
+  tap recording on it, like annotating a View class. `mask(view)` does the same
+  for any view.
+- **API for wrapper SDKs** (Flutter, React Native): `setWrapper`,
+  `recordExternalError`, `captureExternalScreenshot`, `addExternalSnapshot`,
+  `setExternalScreenCapture`, `currentSessionId`, `isReplaySampled`. See
+  "Wrapper SDKs" in the README.
+- **Backup rules.** The AAR ships `@xml/unilitix_backup_rules` and
+  `@xml/unilitix_data_extraction_rules` for your manifest, and the SDK replaces
+  its ids if it finds them restored from another device's backup.
+- **Performance budgets in CI.** Init cost, `trackEvent` cost and screenshot
+  cost are measured on Android 7 and 14 emulators on every pull request, and on
+  real devices nightly (Firebase Test Lab). See `docs/performance.md`.
+- **Signed build provenance.** Each published AAR comes with a GitHub build
+  provenance attestation (`gh attestation verify`).
+
+### Changed
+- **`identify` sends its own request.** It now posts the user id and traits to
+  `/v1/ingest/identify` once (held while consent is pending), instead of
+  attaching the traits to every session. The user id still travels with every
+  upload and is kept across launches.
+- **`reset()` also replaces the install id** and uploads what was already
+  captured under the old identity first. Opting out deletes the install id.
+- **`sampleRate` samples session replay only.** It used to drop custom events
+  at random. Now every event is captured, and `sampleRate` decides once per
+  session whether screenshots and snapshots are taken.
+- **Custom event properties are sent as `properties`**, not mixed into
+  `metadata`, and are normalised: at most 5 levels deep, 100 entries per map or
+  list, strings (and event names, screen names, user ids) cut at 1024
+  characters without breaking an emoji, `NaN` and `Infinity` sent as `null`.
+  A `NaN` can no longer break a whole upload.
+- **Every event has an `eventId` and a sequence number**, and each session
+  starts with a `SESSION_START` event, so a retried upload is never counted
+  twice.
+- **Network types follow the contract:** `ETHERNET` is no longer reported as
+  `WIFI`, and the session's network type is no longer `OFFLINE` on Ethernet or
+  an unknown network. New values: `ETHERNET`, `5G` (also on sessions),
+  `CELLULAR` (generation unknown) and `UNKNOWN`.
+- **A 402 (plan limit reached) keeps your data** and pauses uploads for the
+  time the server asks (1 second to 1 hour, 15 minutes by default). It used to
+  drop the batch.
+- **Calling `trackScreen` with the screen that is already showing does nothing.**
+- **Native crashes group by your code.** A native crash's fingerprint now
+  includes the first three frames from your app's own libraries (system
+  libraries, Flutter, React Native and the SDK are skipped), so different
+  native bugs are no longer one issue per signal. The API regroups older
+  reports the same way.
+- **`@UnilitixPrivate` can no longer target Kotlin properties**, only classes and
+  fields (Kotlin applies it to the backing field). A property without a
+  backing field, which the SDK could never read, no longer compiles with it.
+- **The SDK runs in your app's main process only.** `init` in another process
+  is ignored.
+- `recordException` now sends the message as given; the platform goes to
+  `metadata.platform` instead of a `[android]` prefix on the message.
+
+### Fixed
+- **Screenshot uploads against the current API.** The SDK looked for the
+  upload slots under `uploads`; the API answers `slots`, so frames stayed on the
+  device. Both names are read now, each frame is matched to its slot by number,
+  and its exact size is declared so the storage accepts only that frame.
+- **Snapshots could be uploaded under the wrong session.** They were held in
+  memory and sent with whichever session was uploaded next. They are now
+  stored on the device with their own session and uploaded under it.
+- **`init` no longer blocks the main thread on disk or the key store.** Only
+  the crash handler is installed right away; the database, encrypted storage
+  and native library open on a background thread.
+- **Screenshots are taken off the main thread** with PixelCopy on Android 8+,
+  directly at the upload size, which also captures GPU-drawn content (hardware
+  bitmaps) that the old method could not. Older Android versions still draw
+  the screen at the upload size.
+- **A batch the server keeps failing no longer blocks the queue.** After 10
+  failed attempts it is set aside so newer data goes, retried on the next three
+  launches, then dropped. A batch is never larger than the API accepts.
+- **No timers in the background.** CPU sampling, the battery receiver and the
+  ANR watchdog stop when the app leaves the screen.
+- **Crash reports during start-up are no longer lost.** A JVM crash before the
+  SDK has finished starting is written to disk and reported on the next launch.
+- Requests time out after 40 seconds in total, as the contract specifies.
+
+### Upgrading from 1.10
+- Events still queued from 1.10 are converted and uploaded under their sessions
+  on the first launch; the install id and user id are kept.
+- If your app reads `UnilitixConfig.sampleRate` to estimate event volume, note
+  that events are no longer sampled.
+
 ## 1.10.2
 
 Host-app safety fixes from the go-live audit. No API changes; a drop-in

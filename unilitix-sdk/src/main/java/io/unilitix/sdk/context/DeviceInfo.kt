@@ -12,7 +12,6 @@ import io.unilitix.sdk.BuildConfig
 import io.unilitix.sdk.capture.Dp
 import java.util.Locale
 import java.util.TimeZone
-import java.util.UUID
 
 internal data class DeviceInfo(
     val manufacturer: String,
@@ -29,7 +28,6 @@ internal data class DeviceInfo(
     val appVersion: String,
     val buildNumber: String,
     val sdkVersion: String,
-    val installId: String,
     val totalStorageGb: Double
 )
 
@@ -82,8 +80,6 @@ internal fun collectDeviceInfo(context: Context): DeviceInfo {
         "0"
     }
 
-    val installId = getOrCreateInstallId(context)
-
     val totalStorageGb = try {
         val stat = StatFs(Environment.getDataDirectory().path)
         (stat.blockSizeLong * stat.blockCountLong).toDouble() / (1024.0 * 1024.0 * 1024.0)
@@ -104,17 +100,18 @@ internal fun collectDeviceInfo(context: Context): DeviceInfo {
         appVersion = appVersion,
         buildNumber = buildNumber,
         sdkVersion = BuildConfig.SDK_VERSION,
-        installId = installId,
         totalStorageGb = totalStorageGb
     )
 }
 
-private fun getOrCreateInstallId(context: Context): String {
+/**
+ * The install id SDKs up to 1.10.2 kept in `unilitix_sdk_prefs`; 1.11.0 moves
+ * it into the engine's device store (it rotates on reset and is deleted on
+ * opt-out). Returned once and removed.
+ */
+internal fun takeLegacyInstallId(context: Context): String? {
     val prefs = context.getSharedPreferences("unilitix_sdk_prefs", Context.MODE_PRIVATE)
-    var id = prefs.getString("install_id", null)
-    if (id == null) {
-        id = UUID.randomUUID().toString()
-        prefs.edit().putString("install_id", id).apply()
-    }
+    val id = prefs.getString("install_id", null) ?: return null
+    prefs.edit().remove("install_id").apply()
     return id
 }

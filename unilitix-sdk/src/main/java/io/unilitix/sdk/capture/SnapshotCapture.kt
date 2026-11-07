@@ -21,7 +21,6 @@ import android.widget.ImageView
 import android.widget.TextView
 import io.unilitix.sdk.Unilitix
 import io.unilitix.sdk.UnilitixConfig
-import io.unilitix.sdk.UnilitixPrivate
 import io.unilitix.sdk.core.Snapshot
 import io.unilitix.sdk.util.Logger
 import kotlinx.coroutines.CoroutineExceptionHandler
@@ -32,7 +31,6 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.lang.reflect.Field
-import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * View-tree snapshots of the resumed activity's window.
@@ -59,11 +57,14 @@ import java.util.concurrent.atomic.AtomicInteger
  */
 internal class SnapshotCapture(
     private val config: UnilitixConfig,
-    /** False while consent is denied: nothing is captured. */
+    /** Consent allows capture and the current session is sampled for replay. */
     private val isEnabled: () -> Boolean = { true },
     /** The current session's id; a change restarts the schedule and dedupe. */
     private val sessionId: () -> String? = { null },
-    private val onSnapshot: (Snapshot) -> Unit
+    /** Per-session ordinals and cap, shared with snapshots supplied by a wrapper SDK. */
+    private val replayState: ReplayState,
+    /** Called off the main thread with the session the snapshot belongs to. */
+    private val onSnapshot: (sessionId: String, Snapshot) -> Unit
 ) : Application.ActivityLifecycleCallbacks {
 
     private val handler = Handler(Looper.getMainLooper())
@@ -75,7 +76,6 @@ internal class SnapshotCapture(
             Logger.w("SnapshotCapture: background task failed: ${t.javaClass.simpleName}: ${t.message}")
         }
     )
-    private val ordinal = AtomicInteger(0)
 
     private val maskPolicy = MaskPolicy(
         maskInputs              = config.maskInputs,
@@ -100,11 +100,6 @@ internal class SnapshotCapture(
         }
     }
 
-    /** New session: ordinals restart and the per-session cap is counted afresh. */
-    fun resetSession() {
-        ordinal.set(0)
-    }
-
     override fun onActivityResumed(activity: Activity) {
         currentActivity = activity
         scheduler.markNavigation() // a new screen, or back from the background
@@ -120,16 +115,17 @@ internal class SnapshotCapture(
 
     /** Main thread. */
     private fun tick(activity: Activity) {
+        if (replayState.externalCapture) return
         if (!isEnabled()) return
-        // maxSnapshotsPerSession: stop for the rest of this session.
-        if (ordinal.get() >= config.maxSnapshotsPerSession) return
+        val session = sessionId() ?: return
         if (ReplayMasking.isSecureWindow(activity.window.attributes.flags)) return
         val rootView = activity.window.decorView
         // Not laid out yet: keep a pending navigation for the next tick.
         if (rootView.width <= 0 || rootView.height <= 0) return
 
         val now = SystemClock.uptimeMillis()
-        if (!scheduler.shouldWalk(now, sessionId() ?: "")) return
+        if (!scheduler.shouldWalk(now, session)) return
+        PrivacyTags.scanActivity(activity)
 
         try {
             val window = WindowGeometry.windowPixels(activity)
@@ -143,14 +139,15 @@ internal class SnapshotCapture(
             val screenName = activity.javaClass.simpleName
 
             if (!scheduler.accept(tree, screenName, viewportWidth, viewportHeight, now)) return
-            val captureOrdinal = ordinal.getAndIncrement()
-            if (captureOrdinal >= config.maxSnapshotsPerSession) return
+            // maxSnapshotsPerSession: null once this session's cap is reached.
+            val captureOrdinal = replayState.nextSnapshotOrdinal(session) ?: return
             val capturedAt = System.currentTimeMillis()
 
             // Off the main thread: only encoding and the hand-off; the tree is immutable.
             captureScope.launch {
                 try {
                     onSnapshot(
+                        session,
                         Snapshot(
                             capturedAt     = capturedAt,
                             ordinal        = captureOrdinal,
@@ -193,7 +190,7 @@ internal class SnapshotCapture(
         override val isWebView: Boolean get() = view is WebView
         override val isGone: Boolean get() = view.visibility == View.GONE
         override val isVisible: Boolean get() = view.visibility == View.VISIBLE
-        override val isPrivate: Boolean get() = view.javaClass.isAnnotationPresent(UnilitixPrivate::class.java)
+        override val isPrivate: Boolean get() = PrivacyTags.isPrivate(view)
         override val isMaskedById: Boolean get() = view.id != View.NO_ID && view.id in config.maskedViewIds
         override val isUnmasked: Boolean get() = Unilitix.isUnmasked(view)
         override val isPassword: Boolean
