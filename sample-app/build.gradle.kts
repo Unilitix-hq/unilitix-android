@@ -18,7 +18,9 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // Shrunk like a real app's release build, so CI catches a missing
+            // consumer rule in the SDK (1.11.1 shipped without the Tink one).
+            isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.11.2
+
+### Fixed
+- **Release builds of apps that shrink code (R8/ProGuard) failed** with
+  `Missing class com.google.errorprone.annotations.*`. The SDK's encrypted
+  storage library (Tink, via androidx.security-crypto) refers to
+  compile-only annotations; the SDK's consumer rules now tell R8 to ignore
+  them, so apps need no rules of their own.
+
 ## 1.11.1
 
 ### Fixed
