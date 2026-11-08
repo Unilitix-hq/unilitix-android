@@ -47,3 +47,10 @@
 # OkHttp, Okio and kotlinx.coroutines ship their own consumer rules; the
 # blanket dontwarn rules for OkHttp, Okio and kotlinx.coroutines that used to
 # be here hid real warnings in the host app's own code paths (removed 1.10.2).
+
+# androidx.security:security-crypto (encrypted storage) brings in Tink, which
+# refers to compile-only annotations (Error Prone, JSR-305). Without these
+# rules R8 stops every minified release build of the host app with
+# "Missing class com.google.errorprone.annotations.*" (1.11.2).
+-dontwarn com.google.errorprone.annotations.**
+-dontwarn javax.annotation.**
